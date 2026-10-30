@@ -1,0 +1,17 @@
+cmake_minimum_required(VERSION 3.22)
+project(noir_usb LANGUAGES C CXX)
+add_library(noir_usb SHARED usb_transport.cpp)
+target_sources(noir_usb PRIVATE $<$<CONFIG:Debug>:usb_transport_test.cpp>)
+target_compile_features(noir_usb PRIVATE cxx_std_17)
+target_compile_options(noir_usb PRIVATE -Wall -Wextra -Werror)
+
+# Pinned libFLAC 1.5.0 and Media3 1.11.1 JNI/renderer, integer PCM output.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+foreach(option BUILD_CXXLIBS BUILD_PROGRAMS BUILD_EXAMPLES BUILD_TESTING BUILD_DOCS WITH_OGG BUILD_SHARED_LIBS INSTALL_MANPAGES INSTALL_PKGCONFIG_MODULES INSTALL_CMAKE_CONFIG_MODULE)
+    set(${option} OFF CACHE BOOL "" FORCE)
+endforeach()
+add_subdirectory(flac/libflac EXCLUDE_FROM_ALL)
+add_library(flacJNI SHARED flac/flac_jni.cc flac/flac_parser.cc)
+target_compile_features(flacJNI PRIVATE cxx_std_17)
+target_include_directories(flacJNI PRIVATE flac/libflac/include)
+target_link_libraries(flacJNI PRIVATE FLAC android log)

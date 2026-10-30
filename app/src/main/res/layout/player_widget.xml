@@ -1,0 +1,10 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:id="@+id/widget_root" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:background="@drawable/widget_bg" android:padding="16dp">
+    <TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="N O I R" android:textColor="#A9C5B5" android:textSize="10sp" android:letterSpacing="0.15" />
+    <TextView android:id="@+id/widget_title" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="6dp" android:text="Выбери свою музыку" android:textColor="#EEF1EF" android:textSize="16sp" android:maxLines="1" android:ellipsize="end" />
+    <TextView android:id="@+id/widget_artist" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="Открыть NOIR" android:textColor="#A5ACA9" android:textSize="12sp" android:maxLines="1" android:ellipsize="end" />
+    <LinearLayout android:layout_width="match_parent" android:layout_height="48dp" android:orientation="horizontal" android:gravity="center">
+        <ImageButton android:id="@+id/widget_previous" android:layout_width="64dp" android:layout_height="48dp" android:src="@drawable/ic_previous" android:background="?android:attr/selectableItemBackgroundBorderless" android:contentDescription="Предыдущий трек" />
+        <ImageButton android:id="@+id/widget_play" android:layout_width="64dp" android:layout_height="48dp" android:src="@drawable/ic_play" android:background="?android:attr/selectableItemBackgroundBorderless" android:contentDescription="Пуск или пауза" />
+        <ImageButton android:id="@+id/widget_next" android:layout_width="64dp" android:layout_height="48dp" android:src="@drawable/ic_next" android:background="?android:attr/selectableItemBackgroundBorderless" android:contentDescription="Следующий трек" />
+    </LinearLayout>
+</LinearLayout>

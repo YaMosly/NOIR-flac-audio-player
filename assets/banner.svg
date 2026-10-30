@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="400" viewBox="0 0 1280 400" role="img" aria-labelledby="title desc">
+  <title id="title">NOIR — Offline FLAC player for Android</title>
+  <desc id="desc">A dark banner with mint typography and concentric teal and violet rings.</desc>
+  <defs>
+    <radialGradient id="background" cx="80%" cy="50%" r="80%">
+      <stop offset="0" stop-color="#15252b"/><stop offset=".5" stop-color="#101118"/><stop offset="1" stop-color="#090b0e"/>
+    </radialGradient>
+    <linearGradient id="ring" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#c8ddd2"/><stop offset=".46" stop-color="#3191a5"/><stop offset="1" stop-color="#5b416f"/>
+    </linearGradient>
+    <filter id="glow" x="-100%" y="-100%" width="300%" height="300%"><feGaussianBlur stdDeviation="16"/></filter>
+    <clipPath id="clip"><rect width="1280" height="400" rx="24"/></clipPath>
+  </defs>
+  <g clip-path="url(#clip)">
+    <rect width="1280" height="400" fill="url(#background)"/>
+    <g transform="translate(1000 200)" fill="none" stroke="url(#ring)">
+      <circle r="138" stroke-width="15" opacity=".45" filter="url(#glow)"/>
+      <circle r="138" stroke-width="2" opacity=".8"/>
+      <circle r="112" stroke-width="1" opacity=".22"/>
+      <circle r="166" stroke-width="1" opacity=".17"/>
+      <circle r="200" stroke-width="1" opacity=".1"/>
+      <circle r="238" stroke-width="1" opacity=".06"/>
+    </g>
+    <text x="80" y="162" fill="#ecefed" font-family="Arial, Helvetica, sans-serif" font-size="82" font-weight="600" letter-spacing="24">NOIR</text>
+    <text x="84" y="222" fill="#c8ddd2" font-family="Arial, Helvetica, sans-serif" font-size="24" letter-spacing="1">Your music. In its own resolution.</text>
+    <text x="84" y="296" fill="#9ba4a2" font-family="Arial, Helvetica, sans-serif" font-size="15" letter-spacing="3">OFFLINE FLAC  /  ANDROID  /  DIRECT USB</text>
+    <rect x="1" y="1" width="1278" height="398" rx="23" fill="none" stroke="#c8ddd2" stroke-opacity=".09"/>
+  </g>
+</svg>

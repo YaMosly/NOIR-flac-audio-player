@@ -1,0 +1,45 @@
+# Android / Gradle / native build output
+.gradle/
+.kotlin/
+.cxx/
+.externalNativeBuild/
+build/
+local.properties
+captures/
+*.apk
+*.aab
+*.apks
+*.apkm
+
+# Machine-specific settings and signing material
+.idea/
+*.iml
+.vscode/
+*.jks
+*.keystore
+keystore.properties
+signing.properties
+.env
+.env.*
+!.env.example
+*.log
+*.hprof
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+# Internal code documentation and development history stay local.
+# Public README, screenshots, and third-party notices remain tracked.
+/docs/internal/
+/docs/code/
+/docs/development/
+/DEVELOPMENT.md
+/AGENTS.md
+/CLAUDE.md
+/.codex/
+/notes/
+/validation/
+
+# Generated emulator music; reproducible scripts and small test vectors are public.
+/tools/music/
