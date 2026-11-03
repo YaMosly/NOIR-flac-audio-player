@@ -54,4 +54,17 @@ class UsbPlaybackPlanTest {
         mixed[mixed.size - 16] = 3 // PCM and PCM8 advertised together: do not guess the wire format.
         assertThrows(IllegalStateException::class.java) { select(raw = mixed) }
     }
+    @Test fun asynchronousPlaybackRequiresOneExplicitFeedbackEndpointAndPacketHeadroom() {
+        val description=UsbAudioDescriptors.parse(descriptor())
+        val out=ep(attributes=5,packet=28)
+        val feedback=UsbPlaybackEndpoint(5,4,0x83,0x11,4,4)
+        val plan=UsbPlaybackPlans.select(description,listOf(out,feedback),48000,16,3)
+        assertEquals(feedback,plan.feedback)
+        val invalid=listOf(
+            listOf(out), listOf(out.copy(maxPacket=24),feedback),
+            listOf(out,feedback.copy(maxPacket=3)), listOf(out,feedback.copy(attributes=1)),
+            listOf(out,feedback,feedback.copy(address=0x84)), listOf(out,feedback.copy(iface=9)),
+        )
+        invalid.forEach { endpoints -> assertThrows(IllegalStateException::class.java) { UsbPlaybackPlans.select(description,endpoints,48000,16,3) } }
+    }
 }

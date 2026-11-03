@@ -10,6 +10,7 @@ object NativeUsb {
     external fun create(fd: Int): Long
     external fun setLiveStopped(handle: Long, stopped: Boolean)
     external fun configureLive(handle: Long, rate: Int, frameBytes: Int)
+    external fun configureFeedback(handle: Long, endpoint: Int, interval: Int, packetBytes: Int)
     external fun speed(handle: Long): Int
     external fun stream(handle: Long, endpoint: Int, interval: Int, maxPacket: Int, pcm: ByteArray, stop: AtomicBoolean): String
     external fun destroy(handle: Long)

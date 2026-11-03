@@ -1,5 +1,6 @@
 // Compiled into Debug only. Deterministic fault injection into the production runIso loop.
 #include "usb_stream_core.h"
+#include "usb_feedback.h"
 #include <jni.h>
 #include <deque>
 #include <functional>
@@ -20,6 +21,15 @@ struct FakeIo final : UsbIo {
     std::vector<uint8_t>& pcm;
     std::deque<Item> queue;
     bool copied = false;
+    int feedbackEndpoint = 0, feedbackPollUs = 1000, feedbackSize = 4, coalesceUs = 0;
+    uint32_t feedbackValue = 6U << 16;
+    bool preciseWait = false, missingFeedback = false;
+    int64_t zeroFeedbackUntilUs = 0;
+    void enqueue(Item item) {
+        if (!feedbackEndpoint) { queue.push_back(item); return; }
+        const auto position=std::upper_bound(queue.begin(),queue.end(),item.due,[](int64_t due,const Item& entry){return due<entry.due;});
+        queue.insert(position,item);
+    }
     std::function<void()> produce;
     FakeIo(int scenario, std::vector<uint8_t>& bytes, bool live = false): mode(scenario), pcm(bytes), copied(live) {}
     int control(unsigned long request, void* argument) override {
@@ -27,6 +37,9 @@ struct FakeIo final : UsbIo {
             if (mode == 7 && submitted == 40) return -ENOMEM;
             if (mode == 2) clock += 50'000;
             auto* urb = static_cast<usbdevfs_urb*>(argument);
+            if (feedbackEndpoint && urb->endpoint==feedbackEndpoint) {
+                enqueue({urb,clock+(missingFeedback ? 100000000 : feedbackPollUs)});return 0;
+            }
             if (urb->endpoint != expectedEndpoint) throw std::runtime_error("Wrong playback endpoint");
             if (urb->number_of_packets != 1 || (urb->flags & USBDEVFS_URB_NO_INTERRUPT)) throw std::runtime_error("BEI workaround requires one packet and interrupts enabled");
             if (!copied && urb->buffer != pcm.data() + accepted) throw std::runtime_error("PCM skipped or repeated in submitted URBs");
@@ -40,7 +53,7 @@ struct FakeIo final : UsbIo {
             accepted += total; ++submitted;
             if (submitted > 1 && clock > lastDue) { ++scheduleGaps; largestScheduleGapUs = std::max(largestScheduleGapUs, clock - lastDue); }
             lastDue = std::max(clock, lastDue) + urb->number_of_packets * serviceUs;
-            queue.push_back({urb, lastDue});
+            enqueue({urb, lastDue});
             return 0;
         }
         if (request == USBDEVFS_DISCARDURB) {
@@ -55,13 +68,19 @@ struct FakeIo final : UsbIo {
             auto item = queue.front();
             if (!item.cancelled && ((mode == 1 && completed >= kObservedStallCompletions) || clock < item.due)) return -EAGAIN;
             queue.pop_front();
+            const bool feedback=feedbackEndpoint && item.urb->endpoint==feedbackEndpoint;
             item.urb->status = item.cancelled ? -ENOENT : 0;
             for (int i = 0; i < item.urb->number_of_packets; ++i) {
-                item.urb->iso_frame_desc[i].actual_length = item.cancelled ? 0 : item.urb->iso_frame_desc[i].length;
+                item.urb->iso_frame_desc[i].actual_length = item.cancelled ? 0 : (feedback ? feedbackSize : item.urb->iso_frame_desc[i].length);
                 item.urb->iso_frame_desc[i].status = item.cancelled ? static_cast<unsigned int>(-ENOENT) : 0;
             }
-            if (!item.cancelled && mode == 4 && completed == 19) item.urb->iso_frame_desc[0].status = static_cast<unsigned int>(-EILSEQ);
-            if (!item.cancelled) ++completed;
+            if (feedback && !item.cancelled) {
+                auto* bytes=static_cast<uint8_t*>(item.urb->buffer);
+                const uint32_t value=clock<zeroFeedbackUntilUs?0:feedbackValue;
+                for(int i=0;i<feedbackSize && i<4;++i) bytes[i]=static_cast<uint8_t>(value>>(i*8));
+            }
+            if (!feedback && !item.cancelled && mode == 4 && completed == 19) item.urb->iso_frame_desc[0].status = static_cast<unsigned int>(-EILSEQ);
+            if (!feedback && !item.cancelled) ++completed;
             *static_cast<usbdevfs_urb**>(argument) = item.urb;
             return 0;
         }
@@ -72,6 +91,7 @@ struct FakeIo final : UsbIo {
         if (mode == 6 && !injected) { injected = true; clock += 1000; return -EINTR; }
         if (mode == 12 && !injected && completed >= kObservedStallCompletions) { injected = true; clock += 80'000; }
         else if ((mode == 8 || mode == 9) && !injected && completed >= kObservedStallCompletions) { injected = true; clock += mode == 8 ? 12'000 : 2'100'000; }
+        else if (preciseWait && !queue.empty()) clock=std::max(clock,queue.front().due)+coalesceUs;
         else clock += timeoutMs * 1000;
         if (mode == 5 && clock >= 1'500'000) return POLLHUP;
         return !queue.empty() && (queue.front().cancelled || (clock >= queue.front().due && !(mode == 1 && completed >= kObservedStallCompletions))) ? POLLOUT : 0;
@@ -160,6 +180,70 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_noir_player_UsbTransportNativeTest
         }
         const auto report = result.report(8000, pcm.size()); return env->NewStringUTF(report.c_str());
     } catch (const std::exception& ex) { env->ThrowNew(env->FindClass("java/lang/AssertionError"), ex.what()); return nullptr; }
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_dev_noir_player_UsbTransportNativeTest_explicitFeedbackScenario(JNIEnv* env, jobject, jint mode, jboolean highSpeed) {
+    try {
+        constexpr int rate=48000,frame=4;
+        const bool high=highSpeed==JNI_TRUE;
+        const int intervals=high?8000:1000;
+        std::vector<uint8_t> pcm(rate*frame*2);
+        for(size_t i=0;i<pcm.size();++i) pcm[i]=static_cast<uint8_t>(i*37+i/4096);
+        LivePcmQueue input;input.configure(rate,frame);input.push(pcm.data(),static_cast<int>(pcm.size()));input.finish();
+        auto slots=std::make_unique<std::array<Slot,kLiveDepth>>();
+        FeedbackSlots feedbackSlots;
+        FakeIo io(mode==5?5:(mode==6?3:0),pcm,true);
+        io.serviceUs=1000000/intervals;io.feedbackEndpoint=0x83;io.feedbackSize=high?4:3;
+        const uint32_t nominal=static_cast<uint32_t>((static_cast<uint64_t>(rate)<<(high?16:14))/(high?8000:1000));
+        io.feedbackValue=static_cast<uint32_t>(static_cast<uint64_t>(nominal)*(mode==1?999:1001)/1000);
+        io.missingFeedback=mode==2;
+        if(mode==3) io.feedbackSize=1;
+        if(mode==4) io.feedbackValue=nominal*2;
+        if(mode==7) io.zeroFeedbackUntilUs=50000;
+        if(mode==8) io.zeroFeedbackUntilUs=100000000;
+        FeedbackUsbIo feedback(io,feedbackSlots,0x83,high?4:3,rate,intervals,high);
+        auto result=runIsoSource(*slots,input,4,intervals,(rate/intervals+1)*frame,feedback,rate,frame);
+        require(result.pending==0 && !feedback.auxiliaryPending(),"Feedback/audio requests survived cleanup");
+        if(mode==0 || mode==1 || mode==7) {
+            require(result.outcome=="complete" && result.bytes==pcm.size() && io.accepted==pcm.size() && input.position()==pcm.size(),"Explicit feedback lost or changed PCM");
+            require(feedback.plan.accepted>0,"Feedback was not consumed");
+            require(mode==1 ? feedback.plan.sampleRate()<rate : feedback.plan.sampleRate()>rate,"Clock drift was not followed");
+            if(mode==7) require(feedback.plan.invalid>0,"Clock-lock warmup was not exercised");
+        } else if(mode==6) {
+            require(result.outcome=="stopped" && input.position()>0 && input.position()<pcm.size(),"Async pause failed");
+            input.rewind();
+            FakeIo resumed(0,pcm,true);resumed.accepted=input.position();resumed.serviceUs=io.serviceUs;
+            resumed.feedbackEndpoint=0x83;resumed.feedbackSize=high?4:3;resumed.feedbackValue=io.feedbackValue;
+            FeedbackUsbIo resumedFeedback(resumed,feedbackSlots,0x83,high?4:3,rate,intervals,high);
+            result=runIsoSource(*slots,input,4,intervals,(rate/intervals+1)*frame,resumedFeedback,rate,frame);
+            require(result.outcome=="complete" && input.position()==pcm.size() && resumed.accepted==pcm.size() && result.pending==0 && !resumedFeedback.auxiliaryPending(),"Async resume repeated or lost PCM");
+        } else {
+            require(result.outcome=="failed","Bad/missing feedback was not rejected");
+            if(mode==2 || mode==8) require(result.problem.find("stale")!=std::string::npos,"Missing feedback was not distinguished");
+            if(mode==3 || mode==4) require(result.problem.find("invalid")!=std::string::npos,"Malformed feedback was not distinguished");
+        }
+        return env->NewStringUTF((result.report(intervals,pcm.size(),rate,frame)+feedback.report()).c_str());
+    } catch(const std::exception& ex) {env->ThrowNew(env->FindClass("java/lang/AssertionError"),ex.what());return nullptr;}
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_dev_noir_player_UsbTransportNativeTest_completionWakeupScenario(JNIEnv* env,jobject) {
+    try {
+        constexpr int rate=48000,frame=4;
+        std::vector<uint8_t> pcm(rate*frame*2);
+        for(size_t i=0;i<pcm.size();++i) pcm[i]=static_cast<uint8_t>(i*37);
+        auto exercise=[&](int coalesce) {
+            LivePcmQueue input;input.configure(rate,frame);input.push(pcm.data(),static_cast<int>(pcm.size()));input.finish();
+            auto slots=std::make_unique<std::array<Slot,kLiveDepth>>();
+            FakeIo io(0,pcm,true);io.preciseWait=true;io.coalesceUs=coalesce;
+            const auto result=runIsoSource(*slots,input,4,8000,24,io,rate,frame);
+            require(result.outcome=="complete" && result.bytes==pcm.size() && io.accepted==pcm.size() && result.pending==0,"Completion coalescing corrupted PCM");
+            require(result.schedulingGaps==0,"Coalescing exhausted the USB reserve");
+            return result;
+        };
+        const auto baseline=exercise(0),coalesced=exercise(500);
+        require(coalesced.pollWake*3<baseline.pollWake,"Coalescing did not reduce modeled wakes");
+        return env->NewStringUTF(("Modeled completion wakes: "+std::to_string(baseline.pollWake)+" -> "+std::to_string(coalesced.pollWake)+"; identical PCM and no schedule gaps").c_str());
+    } catch(const std::exception& ex){env->ThrowNew(env->FindClass("java/lang/AssertionError"),ex.what());return nullptr;}
 }
 
 extern "C" JNIEXPORT jstring JNICALL Java_dev_noir_player_UsbTransportNativeTest_compatibilityScenario(JNIEnv* env, jobject, jint intervals, jint endpoint) {

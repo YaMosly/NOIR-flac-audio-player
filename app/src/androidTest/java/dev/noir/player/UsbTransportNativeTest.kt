@@ -18,6 +18,34 @@ class UsbTransportNativeTest {
     private external fun hiResScenario(rate: Int, frameBytes: Int): String
     private external fun backgroundScenario(): String
     private external fun compatibilityScenario(intervals: Int, endpoint: Int): String
+    private external fun explicitFeedbackScenario(mode: Int, highSpeed: Boolean): String
+    private external fun completionWakeupScenario(): String
+    @Test fun asyncFeedbackTracksBothDriftDirectionsAndCleansUpOnFaultsAndPause() {
+        for (high in listOf(false,true)) for (mode in 0..8) {
+            val report=explicitFeedbackScenario(mode,high)
+            assertTrue(report,report.contains("Explicit feedback:"))
+        }
+    }
+    @Test fun coalescedCompletionWakesKeepExactPcmAndQueueReserve() {
+        assertTrue(completionWakeupScenario().contains("identical PCM"))
+    }
+    @Test fun feedbackJniConfigurationValidatesBeforeStreaming() {
+        val context=InstrumentationRegistry.getInstrumentation().targetContext
+        val file=java.io.File(context.cacheDir,"feedback-jni-test")
+        val fd=android.os.ParcelFileDescriptor.open(file,android.os.ParcelFileDescriptor.MODE_READ_WRITE or android.os.ParcelFileDescriptor.MODE_CREATE)
+        val handle=NativeUsb.create(fd.fd)
+        try {
+            assertThrows(IllegalStateException::class.java){NativeUsb.configureFeedback(handle,0x83,4,4)}
+            NativeUsb.configureLive(handle,48000,4)
+            assertThrows(IllegalStateException::class.java){NativeUsb.configureFeedback(handle,3,4,4)}
+            assertThrows(IllegalStateException::class.java){NativeUsb.configureFeedback(handle,0x83,9,4)}
+            assertThrows(IllegalStateException::class.java){NativeUsb.configureFeedback(handle,0x83,4,8)}
+            NativeUsb.configureFeedback(handle,0x83,4,4)
+            val pcm=java.nio.ByteBuffer.allocateDirect(4)
+            assertEquals(4,NativeUsb.feedLive(handle,pcm,0,4))
+            assertThrows(IllegalStateException::class.java){NativeUsb.configureFeedback(handle,0x83,4,4)}
+        } finally {fd.close();NativeUsb.destroy(handle);file.delete()}
+    }
     @Test fun otherEndpointsAndFullSpeedOrHighSpeedIntervalsPreserveExactPcmAndDuration() {
         for (intervals in listOf(1000, 2000, 4000, 8000)) for (endpoint in listOf(1, 2, 15)) {
             val report = compatibilityScenario(intervals, endpoint)
