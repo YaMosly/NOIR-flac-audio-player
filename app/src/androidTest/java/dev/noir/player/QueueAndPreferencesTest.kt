@@ -88,4 +88,18 @@ class QueueAndPreferencesTest {
             }
         } finally {main {controller?.pause();controller?.release()}}
     }
+    @Test fun orderedAlbumDoesNotGrowRandomTailAndStopsAtItsEnd() {
+        val tracks=runBlocking {withTimeout(10000){library.tracks.first{it.size==3}}}
+        lateinit var future:com.google.common.util.concurrent.ListenableFuture<MediaController>
+        main {DirectUsbSettings.setEnabled(false);future=MediaController.Builder(context,SessionToken(context,ComponentName(context,PlaybackService::class.java))).buildAsync()}
+        val controller=future.get(10,TimeUnit.SECONDS)
+        try {
+            main {controller.setMediaItems(tracks.map{it.toQueueItem(false,album=true)});controller.prepare()}
+            eventually {controller.playbackState==Player.STATE_READY}
+            main {assertEquals(3,controller.mediaItemCount);controller.seekTo(2,(tracks[2].durationMs-400).coerceAtLeast(0));controller.play()}
+            eventually {controller.playbackState==Player.STATE_ENDED}
+            main {assertEquals(3,controller.mediaItemCount);assertEquals(tracks[2].id,controller.currentMediaItem?.mediaId);assertTrue(controller.currentMediaItem!!.isAlbumQueueItem())}
+            assertTrue(library.savedQueue().all{it.album})
+        } finally {main{controller.pause();controller.stop();controller.release()}}
+    }
 }
