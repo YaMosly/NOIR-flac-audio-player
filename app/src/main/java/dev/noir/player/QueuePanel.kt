@@ -17,9 +17,11 @@ import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 
 private const val AUTOMATIC = "dev.noir.queue.automatic"
+private const val ALBUM = "dev.noir.queue.album"
 fun MediaItem.isAutomaticQueueItem() = mediaMetadata.extras?.getBoolean(AUTOMATIC) == true
-fun Track.toQueueItem(automatic: Boolean) = toMediaItem().buildUpon().setMediaMetadata(
-    toMediaItem().mediaMetadata.buildUpon().setExtras(Bundle().apply { putBoolean(AUTOMATIC, automatic) }).build(),
+fun MediaItem.isAlbumQueueItem() = mediaMetadata.extras?.getBoolean(ALBUM) == true
+fun Track.toQueueItem(automatic: Boolean, album: Boolean = false) = toMediaItem().buildUpon().setMediaMetadata(
+    toMediaItem().mediaMetadata.buildUpon().setExtras(Bundle().apply { putBoolean(AUTOMATIC, automatic); putBoolean(ALBUM, album) }).build(),
 ).build()
 
 @Composable
@@ -77,6 +79,11 @@ fun TrackActions(track: Track, controller: MediaController?, library: LibrarySto
     Box {
         IconButton(onClick = { expanded = true }, enabled = enabled) { Icon(Icons.Outlined.MoreVert, "Действия: ${track.title}") }
         DropdownMenu(expanded, onDismissRequest = { expanded = false }) {
+            if (track.album.isNotBlank()) DropdownMenuItem(text = { Text("Слушать альбом по порядку") }, onClick = {
+                val album = AlbumOrder.tracks(track, library.tracks.value)
+                controller?.let { player -> if (album.isNotEmpty()) { player.setMediaItems(album.map { it.toQueueItem(false, album = true) }); player.prepare(); player.play() } }
+                expanded = false
+            })
             DropdownMenuItem(text = { Text("Слушать следующим") }, onClick = {
                 controller?.let { it.addMediaItem((it.currentMediaItemIndex + 1).coerceIn(0, it.mediaItemCount), track.toMediaItem()) }; expanded = false
             })

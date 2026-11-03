@@ -28,6 +28,7 @@ class UsbLiveHardware @JvmOverloads constructor(private val context: Context, pr
             val manager = context.getSystemService(UsbManager::class.java)
             val device = UsbPlaybackDevices.select(manager)
             check(manager.hasPermission(device)) { "Разреши прямой USB в разделе «Звуковой тракт»" }
+            DirectUsbSettings.bindDevice(device.vendorId, device.productId, runCatching { device.serialNumber }.getOrNull(), device.deviceName)
             val conn = manager.openDevice(device) ?: error("Не удалось открыть ЦАП")
             connection = conn
             handle = NativeUsb.create(conn.fileDescriptor)

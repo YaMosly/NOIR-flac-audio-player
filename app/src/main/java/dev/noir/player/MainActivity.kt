@@ -142,6 +142,7 @@ private fun NoirScreen(library: LibraryStore) {
     var sheet by remember { mutableStateOf<String?>(null) }
     var pickerError by remember { mutableStateOf<String?>(null) }
     var search by remember { mutableStateOf("") }
+    var albumsOnly by remember { mutableStateOf(false) }
     val searchedTracks = remember(tracks, search) { TrackSearch.filter(tracks, search) }
     val diagnostics = remember { AudioDiagnostics(context) }
     val systemOutput by diagnostics.state.collectAsStateWithLifecycle()
@@ -161,11 +162,14 @@ private fun NoirScreen(library: LibraryStore) {
         usbPreview.start()
         usbPreview.setForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
         val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_START) library.setForeground(true)
+            if (event == Lifecycle.Event.ON_STOP) library.setForeground(false)
             if (event == Lifecycle.Event.ON_START) usbPreview.setForeground(true)
             if (event == Lifecycle.Event.ON_STOP) usbPreview.setForeground(false)
             if (event == Lifecycle.Event.ON_START || event == Lifecycle.Event.ON_STOP) BackgroundAudioDiagnostics.record(context, "UI $event")
         }
         lifecycle.addObserver(observer)
+        library.setForeground(lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED))
         onDispose { lifecycle.removeObserver(observer); usbPreview.close() }
     }
     val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -176,7 +180,7 @@ private fun NoirScreen(library: LibraryStore) {
             }.onFailure { pickerError = "Не удалось сохранить доступ. Попробуй другую папку." }
         }
     }
-    val cover by produceState<Bitmap?>(null, current?.id) { value = null; value = library.cover(current) }
+    val cover by produceState<Bitmap?>(null, current) { value = null; value = library.cover(current) }
     val artwork = remember(cover) { cover?.asImageBitmap() }
     val rawTint = remember(cover) { cover?.let(::coverColor) ?: Color(0xFF71978F) }
     val tint by animateColorAsState(rawTint, tween(1400), label = "coverTint")
@@ -206,9 +210,14 @@ private fun NoirScreen(library: LibraryStore) {
                 }
                 OutlinedTextField(search, { search = it }, placeholder = { Text("Трек, исполнитель или альбом") }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(12.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FilterChip(selected = !albumsOnly, onClick = { albumsOnly = false }, label = { Text("Треки") })
+                    FilterChip(selected = albumsOnly, onClick = { albumsOnly = true }, label = { Text("Альбомы") })
+                }
                 TextButton(onClick = { randomPlay(); showLibrary = false }, enabled = controller != null && !usbLocked) { Icon(Icons.Rounded.Shuffle, null, Modifier.size(18.dp)); Spacer(Modifier.width(10.dp)); Text("Перемешать всё") }
                 if (searchedTracks.isEmpty()) Text("Ничего не найдено", color = Muted)
-                LazyColumn(Modifier.weight(1f)) {
+                if (albumsOnly) AlbumPanel(searchedTracks, tracks, controller, controller != null && !usbLocked, Modifier.weight(1f)) { showLibrary = false }
+                else LazyColumn(Modifier.weight(1f)) {
                     items(searchedTracks, key = { it.id }) { track ->
                         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(enabled = controller != null && !usbLocked) {
                             controller?.setMediaItem(track.toMediaItem()); controller?.prepare(); controller?.play(); showLibrary = false
@@ -248,7 +257,7 @@ private fun NoirScreen(library: LibraryStore) {
                         HorizontalDivider(color = Muted.copy(alpha = .15f))
                         Text("Папка · ${folder ?: "Не выбрана"}", color = Muted)
                         TextButton(onClick = { sheet = null; picker.launch(library.tree) }, enabled = !scan.scanning) { Icon(Icons.Outlined.FolderOpen, null); Spacer(Modifier.width(10.dp)); Text("Выбрать папку") }
-                        TextButton(onClick = { library.tree?.let(library::scanFolder) }, enabled = library.tree != null && !scan.scanning) { Text("Обновить библиотеку") }
+                        TextButton(onClick = library::refreshFolder, enabled = library.tree != null && !scan.scanning) { Text("Обновить библиотеку") }
                         scan.message?.let { Text(it, color = Muted, fontSize = 13.sp) }
                         TextButton(onClick = { sheet = "background" }) { Text("Работа при выключенном экране") }
                         TextButton(onClick = { diagnostics.refresh(); sheet = "audio" }) { Text("Звуковой тракт и USB-ЦАП") }

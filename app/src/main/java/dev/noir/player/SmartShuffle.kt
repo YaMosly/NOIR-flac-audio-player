@@ -22,8 +22,13 @@ object SmartShuffle {
         preferences: ListeningPreferences = ListeningPreferences(),
     ): Track? {
         if (tracks.isEmpty()) return null
-        val avoid = recent.takeLast(minOf(30, max(0, tracks.size - 1))).toSet()
-        val candidates = tracks.filterNot { it.id in avoid }.ifEmpty { tracks }
+        // Deduplicate from the newest end, otherwise Back/repeated manual plays
+        // can crowd unseen tracks out of the history window.
+        val avoid = recent.asReversed().distinct().take(minOf(1000, max(0, tracks.size - 1))).toSet()
+        val fresh = tracks.filterNot { it.id in avoid }.ifEmpty { tracks }
+        val byId = tracks.associateBy { it.id }
+        val recentArtists = recent.takeLast(2).mapNotNull { byId[it]?.artist?.let(ListeningPreferences::artistKey)?.takeIf(String::isNotEmpty) }.toSet()
+        val candidates = if (smart) fresh.filterNot { ListeningPreferences.artistKey(it.artist) in recentArtists }.ifEmpty { fresh } else fresh
         val weights = candidates.map { track ->
             if (!smart) 1.0 else {
                 val trackWeight = scores[track.id]?.weight(now) ?: 1.0
