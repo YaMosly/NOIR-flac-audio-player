@@ -63,4 +63,29 @@ class QueueAndPreferencesTest {
             assertEquals(scores,library.scores)
         } finally {main {library.setLessTrack(id,id in before.tracks);library.setLessArtist(artist,before.lessArtist(artist))}}
     }
+    @Suppress("DEPRECATION")
+    @Test fun manualQueueAndPausedPositionRestoreAfterServiceRecreation() {
+        val tracks=runBlocking {withTimeout(10000){library.tracks.first{it.size==3}}}
+        val expected=listOf(tracks[2],tracks[0],tracks[1])
+        fun connect():MediaController {
+            lateinit var future:com.google.common.util.concurrent.ListenableFuture<MediaController>
+            main {future=MediaController.Builder(context,SessionToken(context,ComponentName(context,PlaybackService::class.java))).buildAsync()}
+            return future.get(10,TimeUnit.SECONDS)
+        }
+        var controller:MediaController?=connect()
+        try {
+            main {DirectUsbSettings.setEnabled(false);controller!!.setMediaItems(expected.map{it.toMediaItem()});controller!!.prepare();controller!!.seekTo(4200)}
+            eventually {controller!!.playbackState==Player.STATE_READY && library.restorePosition==4200L && library.savedQueue().take(3).map{it.id}==expected.map{it.id}}
+            main {controller!!.release();controller=null;context.stopService(android.content.Intent(context,PlaybackService::class.java))}
+            eventually {context.getSystemService(android.app.ActivityManager::class.java).getRunningServices(100).none{it.service.className==PlaybackService::class.java.name}}
+            controller=connect()
+            eventually {controller!!.mediaItemCount>=3 && controller!!.currentMediaItem?.mediaId==expected[0].id}
+            main {
+                val first=controller!!.currentMediaItemIndex
+                assertEquals(expected.map{it.id},(first..first+2).map{controller!!.getMediaItemAt(it).mediaId})
+                assertTrue("Paused position was lost: ${controller!!.currentPosition}",controller!!.currentPosition in 4000..4500)
+                assertFalse(controller!!.playWhenReady)
+            }
+        } finally {main {controller?.pause();controller?.release()}}
+    }
 }
