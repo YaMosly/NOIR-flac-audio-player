@@ -155,6 +155,7 @@ class PlaybackService : MediaSessionService() {
                 BackgroundAudioDiagnostics.record(this@PlaybackService, "isPlaying=$isPlaying")
                 saveAndUpdateWidget()
             }
+            override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) { saveAndUpdateWidget() }
             override fun onPlayerError(error: PlaybackException) {
                 // Do not silently skip files forever. Keep the failed item visible for diagnosis.
                 saveAndUpdateWidget()
@@ -248,7 +249,10 @@ class PlaybackService : MediaSessionService() {
         if (command in setOf(ACTION_PLAY, ACTION_NEXT, ACTION_PREVIOUS, ACTION_RANDOM)) scope.launch {
             val tracks = withTimeoutOrNull(5_000) { library.tracks.first { it.isNotEmpty() } }
             if (tracks == null) { stopSelf(startId); return@launch }
-            if (player.mediaItemCount == 0) replaceQueue(tracks.first(), tracks)
+            if (player.mediaItemCount == 0) {
+                val start = tracks.firstOrNull { it.id == library.restoreId } ?: tracks.first()
+                replaceQueue(start, tracks, library.restorePosition, restore = true)
+            }
             when (command) {
                 ACTION_PLAY -> if (player.isPlaying) player.pause() else { if (player.playbackState == Player.STATE_IDLE) player.prepare(); player.play() }
                 ACTION_NEXT -> { player.seekToNextMediaItem(); player.play() }

@@ -180,7 +180,7 @@ private fun NoirScreen(library: LibraryStore) {
             }.onFailure { pickerError = "Не удалось сохранить доступ. Попробуй другую папку." }
         }
     }
-    val cover by produceState<Bitmap?>(null, current?.id) { value = null; value = library.cover(current) }
+    val cover by produceState<Bitmap?>(null, current) { value = null; value = library.cover(current) }
     val artwork = remember(cover) { cover?.asImageBitmap() }
     val rawTint = remember(cover) { cover?.let(::coverColor) ?: Color(0xFF71978F) }
     val tint by animateColorAsState(rawTint, tween(1400), label = "coverTint")

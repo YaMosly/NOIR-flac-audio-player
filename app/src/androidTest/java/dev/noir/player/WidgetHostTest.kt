@@ -47,7 +47,7 @@ class WidgetHostTest {
             main {view.findViewById<TextView>(R.id.widget_less).performClick()}
             waitFor{library.preferences.value.lessTrack(track.id) && view.findViewById<TextView>(R.id.widget_less).text.toString().startsWith("Отменить")}
             main {view.findViewById<TextView>(R.id.widget_less).performClick()}
-            waitFor{!library.preferences.value.lessTrack(track.id)}
+            waitFor{!library.preferences.value.lessTrack(track.id) && view.findViewById<TextView>(R.id.widget_less).text.toString()=="Реже этот трек"}
             val screenshot=instrumentation.uiAutomation.takeScreenshot()
             java.io.File(context.getExternalFilesDir(null),"noir-widget-v090.png").outputStream().use{screenshot.compress(Bitmap.CompressFormat.PNG,100,it)}
         } finally {

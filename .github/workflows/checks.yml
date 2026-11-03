@@ -23,6 +23,8 @@ jobs:
           distribution: temurin
           java-version: '21'
       - uses: gradle/actions/setup-gradle@4c125117fe7c5aed11272ec4213f602f012f89f2 # v5; validates wrapper
+        with:
+          cache-read-only: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork }}
       - name: Install pinned Android tools
         shell: bash
         run: |
@@ -33,7 +35,7 @@ jobs:
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
           echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
       - name: Build, unit tests and lint
-        run: bash gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest assembleRelease --console=plain
+        run: bash gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest assembleRelease --console=plain --max-workers=2
       - name: Prepare synthetic FLAC fixtures
         run: |
           python -m venv build/ci-python
@@ -46,7 +48,7 @@ jobs:
           test -e /dev/kvm
           sudo chmod a+rw /dev/kvm
           echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --force --name NoirCompat37 --package 'system-images;android-37.0;aosp_atd;x86_64'
-          emulator -avd NoirCompat37 -port 5582 -no-window -no-audio -no-snapshot -gpu swiftshader -memory 4096 > build/emulator.log 2>&1 &
+          emulator -avd NoirCompat37 -port 5582 -no-window -no-audio -no-snapshot -gpu swiftshader -memory 4096 -skin 1080x2400 -dpi-device 480 > build/emulator.log 2>&1 &
           for attempt in $(seq 1 120); do
             if adb -s emulator-5582 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | grep -q '^1$'; then exit 0; fi
             sleep 2
