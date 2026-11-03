@@ -1,0 +1,72 @@
+name: Checks
+on:
+  pull_request:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: gradle/actions/setup-gradle@4c125117fe7c5aed11272ec4213f602f012f89f2 # v5; validates wrapper
+      - name: Install pinned Android tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" --channel=3 'platforms;android-37.0' 'build-tools;36.0.0' 'ndk;30.0.16248370' 'cmake;4.1.2' 'emulator' 'platform-tools' 'system-images;android-37.0;aosp_atd;x86_64'
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
+          echo "$ANDROID_HOME/emulator" >> "$GITHUB_PATH"
+      - name: Build, unit tests and lint
+        run: bash gradlew testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest assembleRelease --console=plain
+      - name: Prepare synthetic FLAC fixtures
+        run: |
+          python -m venv build/ci-python
+          build/ci-python/bin/pip install numpy soundfile pillow mutagen
+          build/ci-python/bin/python tools/create-fixtures.py
+      - name: Start isolated Android 17 emulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -e /dev/kvm
+          sudo chmod a+rw /dev/kvm
+          echo no | "$ANDROID_HOME/cmdline-tools/latest/bin/avdmanager" create avd --force --name NoirCompat37 --package 'system-images;android-37.0;aosp_atd;x86_64'
+          emulator -avd NoirCompat37 -port 5582 -no-window -no-audio -no-snapshot -gpu swiftshader -memory 4096 > build/emulator.log 2>&1 &
+          for attempt in $(seq 1 120); do
+            if adb -s emulator-5582 shell getprop sys.boot_completed 2>/dev/null | tr -d '\r' | grep -q '^1$'; then exit 0; fi
+            sleep 2
+          done
+          cat build/emulator.log
+          exit 1
+      - name: Playback, USB models, queue, widget and library tests
+        run: build/ci-python/bin/python tools/run-emulator-checks.py "$ANDROID_HOME/platform-tools/adb" emulator-5582 --release
+      - name: Stop test emulator
+        if: always()
+        run: adb -s emulator-5582 emu kill || true
+      - uses: actions/upload-artifact@330a01c490aca151604b8cf639adc76d48f6c5d4 # v5
+        if: always()
+        with:
+          name: noir-checks-${{ github.run_id }}
+          retention-days: 7
+          path: |
+            app/build/reports/
+            app/build/test-results/
+            app/build/outputs/apk/
+            build/emulator-checks/
+            build/emulator.log
+          if-no-files-found: warn
