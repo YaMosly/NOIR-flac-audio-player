@@ -17,6 +17,14 @@ class UsbTransportNativeTest {
     private external fun liveScenario(mode: Int): String
     private external fun hiResScenario(rate: Int, frameBytes: Int): String
     private external fun backgroundScenario(): String
+    private external fun compatibilityScenario(intervals: Int, endpoint: Int): String
+    @Test fun otherEndpointsAndFullSpeedOrHighSpeedIntervalsPreserveExactPcmAndDuration() {
+        for (intervals in listOf(1000, 2000, 4000, 8000)) for (endpoint in listOf(1, 2, 15)) {
+            val report = compatibilityScenario(intervals, endpoint)
+            assertTrue(report, report.contains("Native USB: complete"))
+            assertTrue(report, report.contains("Service intervals/s: $intervals"))
+        }
+    }
     private external fun waitForNativeStop(handle: Long): Long
     @Test fun deepQueueAndPcmReserveSurviveSchedulingAndDecoderStalls() {
         val result = backgroundScenario()

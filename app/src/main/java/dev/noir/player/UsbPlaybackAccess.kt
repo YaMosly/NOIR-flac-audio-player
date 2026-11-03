@@ -25,8 +25,9 @@ class UsbPlaybackAccess(private val context: Context) : AutoCloseable {
     init { ContextCompat.registerReceiver(context, receiver, IntentFilter(action), ContextCompat.RECEIVER_NOT_EXPORTED) }
     fun enable() {
         if (UsbPlaybackInterlock.active.value) return
-        val device = manager.deviceList.values.singleOrNull { it.vendorId == 0x0e55 && it.productId == 0x1110 }
-        if (device == null) { DirectUsbSettings.status.value = "Подключи ЦАП 0E55:1110 и повтори включение"; return }
+        val device = runCatching { UsbPlaybackDevices.select(manager) }.getOrElse {
+            DirectUsbSettings.status.value = it.message.orEmpty(); return
+        }
         DirectUsbSettings.failure.value = null
         if (manager.hasPermission(device)) {
             DirectUsbSettings.setEnabled(true)

@@ -4,13 +4,13 @@ plugins {
 }
 android {
     namespace = "dev.noir.player"
-    compileSdk = 36
+    compileSdk = 37
     defaultConfig {
         applicationId = "dev.noir.player"
         minSdk = 34
-        targetSdk = 36
-        versionCode = 12
-        versionName = "0.6.2"
+        targetSdk = 37
+        versionCode = 13
+        versionName = "0.7.0"
         testInstrumentationRunner = if (providers.gradleProperty("noirReleaseProbe").isPresent) "dev.noir.player.ReleaseProbeInstrumentation" else "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }

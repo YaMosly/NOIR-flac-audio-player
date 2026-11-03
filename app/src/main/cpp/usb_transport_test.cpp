@@ -12,7 +12,7 @@ constexpr int kObservedStallCompletions = kObservedStallPackets / kPackets;
 struct FakeIo final : UsbIo {
     struct Item { usbdevfs_urb* urb; int64_t due; bool cancelled = false; };
     int mode, submitted = 0, completed = 0;
-    int frameBytes = 4, scheduleGaps = 0;
+    int frameBytes = 4, scheduleGaps = 0, serviceUs = 125, expectedEndpoint = 4;
     int64_t largestScheduleGapUs = 0;
     int64_t clock = 0, lastDue = 0;
     bool injected = false;
@@ -27,6 +27,7 @@ struct FakeIo final : UsbIo {
             if (mode == 7 && submitted == 40) return -ENOMEM;
             if (mode == 2) clock += 50'000;
             auto* urb = static_cast<usbdevfs_urb*>(argument);
+            if (urb->endpoint != expectedEndpoint) throw std::runtime_error("Wrong playback endpoint");
             if (urb->number_of_packets != 1 || (urb->flags & USBDEVFS_URB_NO_INTERRUPT)) throw std::runtime_error("BEI workaround requires one packet and interrupts enabled");
             if (!copied && urb->buffer != pcm.data() + accepted) throw std::runtime_error("PCM skipped or repeated in submitted URBs");
             int total = 0;
@@ -38,7 +39,7 @@ struct FakeIo final : UsbIo {
             if (copied && std::memcmp(urb->buffer, pcm.data() + accepted, static_cast<size_t>(total))) throw std::runtime_error("Live PCM bytes skipped, repeated or changed");
             accepted += total; ++submitted;
             if (submitted > 1 && clock > lastDue) { ++scheduleGaps; largestScheduleGapUs = std::max(largestScheduleGapUs, clock - lastDue); }
-            lastDue = std::max(clock, lastDue) + urb->number_of_packets * 125;
+            lastDue = std::max(clock, lastDue) + urb->number_of_packets * serviceUs;
             queue.push_back({urb, lastDue});
             return 0;
         }
@@ -158,6 +159,21 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_noir_player_UsbTransportNativeTest
             case 10: require(result.outcome == "stopped" && result.submitted == 0 && io.accepted == 0, "Stopped input submitted audio"); break;
         }
         const auto report = result.report(8000, pcm.size()); return env->NewStringUTF(report.c_str());
+    } catch (const std::exception& ex) { env->ThrowNew(env->FindClass("java/lang/AssertionError"), ex.what()); return nullptr; }
+}
+
+extern "C" JNIEXPORT jstring JNICALL Java_dev_noir_player_UsbTransportNativeTest_compatibilityScenario(JNIEnv* env, jobject, jint intervals, jint endpoint) {
+    try {
+        constexpr int rate = 48000, frame = 4;
+        std::vector<uint8_t> pcm(rate * frame);
+        for (size_t i = 0; i < pcm.size(); ++i) pcm[i] = static_cast<uint8_t>(i * 37);
+        LivePcmQueue input; input.configure(rate, frame); input.push(pcm.data(), static_cast<int>(pcm.size())); input.finish();
+        auto slots = std::make_unique<std::array<Slot, kDepth>>();
+        FakeIo io(0, pcm, true); io.serviceUs = 1000000 / intervals; io.expectedEndpoint = endpoint;
+        const auto result = runIsoSource(*slots, input, endpoint, intervals, (rate / intervals) * frame, io, rate, frame);
+        require(result.outcome == "complete" && result.pending == 0 && result.bytes == pcm.size() && io.accepted == pcm.size(), "Compatibility path corrupted PCM");
+        require(result.elapsedUs >= 999000 && result.elapsedUs <= 1001000, "USB timing changed playback duration");
+        return env->NewStringUTF(result.report(intervals, pcm.size(), rate, frame).c_str());
     } catch (const std::exception& ex) { env->ThrowNew(env->FindClass("java/lang/AssertionError"), ex.what()); return nullptr; }
 }
 

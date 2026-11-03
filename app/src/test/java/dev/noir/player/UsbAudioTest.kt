@@ -11,7 +11,7 @@ class UsbAudioTest {
         assertEquals(setOf(0x200), parsed.versions)
         assertEquals(UsbClock(2, 10, 3), parsed.clocks.single())
         assertEquals(listOf(UsbVolume(2, 0x200, 20, 0, true), UsbVolume(2, 0x200, 20, 1, false)), parsed.volumes)
-        assertEquals(UsbStreamFormat(3, 1, 0x200, 2, 24, 3, emptyList()), parsed.formats.single())
+        assertEquals(UsbStreamFormat(3, 1, 0x200, 2, 24, 3, emptyList(), terminal = 1), parsed.formats.single())
         assertTrue(parsed.warnings.isEmpty())
     }
 

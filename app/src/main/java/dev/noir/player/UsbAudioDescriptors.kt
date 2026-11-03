@@ -3,8 +3,9 @@ package dev.noir.player
 /** Bounded parser for USB Audio 1/2 descriptors. It never interprets vendor payloads or serial strings. */
 data class UsbClock(val controlInterface: Int, val id: Int, val controls: Int)
 data class UsbVolume(val controlInterface: Int, val version: Int, val unit: Int, val channel: Int, val writable: Boolean)
-data class UsbStreamFormat(val iface: Int, val alternate: Int, val version: Int, val channels: Int, val bits: Int, val bytesPerSample: Int, val rates: List<Long>, val continuous: Pair<Long, Long>? = null)
-data class UsbAudioDescription(val versions: Set<Int>, val clocks: List<UsbClock>, val volumes: List<UsbVolume>, val formats: List<UsbStreamFormat>, val warnings: List<String>)
+data class UsbStreamFormat(val iface: Int, val alternate: Int, val version: Int, val channels: Int, val bits: Int, val bytesPerSample: Int, val rates: List<Long>, val continuous: Pair<Long, Long>? = null, val terminal: Int = 0, val pcm: Boolean = true)
+data class UsbAudioNode(val iface: Int, val id: Int, val source: Int, val clock: Int = 0, val input: Boolean = false, val output: Boolean = false, val terminalType: Int = 0)
+data class UsbAudioDescription(val versions: Set<Int>, val clocks: List<UsbClock>, val volumes: List<UsbVolume>, val formats: List<UsbStreamFormat>, val warnings: List<String>, val nodes: List<UsbAudioNode> = emptyList())
 
 object UsbAudioDescriptors {
     fun parse(raw: ByteArray): UsbAudioDescription {
@@ -13,8 +14,9 @@ object UsbAudioDescriptors {
         val clocks = mutableListOf<UsbClock>()
         val volumes = mutableListOf<UsbVolume>()
         val formats = mutableListOf<UsbStreamFormat>()
+        val nodes = mutableListOf<UsbAudioNode>()
         val warnings = mutableListOf<String>()
-        var offset = 0; var iface = -1; var alternate = 0; var audio = false; var subclass = 0; var version = 0; var channels = 0
+        var offset = 0; var iface = -1; var alternate = 0; var audio = false; var subclass = 0; var version = 0; var channels = 0; var terminal = 0; var pcm = false
         fun u8(at: Int) = raw[at].toInt() and 255
         fun le(at: Int, bytes: Int): Long = (0 until bytes).fold(0L) { value, i -> value or (u8(at + i).toLong() shl (8 * i)) }
         while (offset < raw.size) {
@@ -28,6 +30,7 @@ object UsbAudioDescriptors {
                     iface = b(2); alternate = b(3); audio = b(5) == 1; subclass = b(6)
                     version = when (b(7)) { 0x20 -> 0x200; 0x30 -> 0x300; else -> 0x100 }
                     channels = 0
+                    terminal = 0; pcm = false
                     if (audio) versions += version
                 }
                 type == 0x24 && audio && size >= 3 -> {
@@ -38,6 +41,13 @@ object UsbAudioDescriptors {
                     }
                     if (subclass == 1 && version in 0x200..0x2ff && subtype == 0x0a && size >= 8) {
                         clocks += UsbClock(iface, b(3), b(5))
+                    }
+                    if (subclass == 1 && version in 0x200..0x2ff) {
+                        when {
+                            subtype == 2 && size >= 17 -> nodes += UsbAudioNode(iface, b(3), 0, b(7), input = true, terminalType = le(offset + 4, 2).toInt())
+                            subtype == 3 && size >= 12 -> nodes += UsbAudioNode(iface, b(3), b(7), b(8), output = true, terminalType = le(offset + 4, 2).toInt())
+                            subtype == 6 && size >= 10 -> nodes += UsbAudioNode(iface, b(3), b(4))
+                        }
                     }
                     if (subclass == 1 && subtype == 6) {
                         if (version in 0x200..0x2ff && size >= 10) {
@@ -57,7 +67,7 @@ object UsbAudioDescriptors {
                             }
                         }
                     }
-                    if (subclass == 2 && version in 0x200..0x2ff && subtype == 1 && size >= 16) channels = b(10)
+                    if (subclass == 2 && version in 0x200..0x2ff && subtype == 1 && size >= 16) { channels = b(10); terminal = b(3); pcm = b(5) == 1 && le(offset + 6, 4) == 1L }
                     if (subclass == 2 && subtype == 2 && size >= 4 && b(3) == 1) {
                         if (version in 0x100..0x1ff && size >= 8) {
                             val count = b(7)
@@ -67,14 +77,14 @@ object UsbAudioDescriptors {
                                 formats += UsbStreamFormat(iface, alternate, version, b(4), b(6), b(5), (0 until count).map { le(offset + 8 + it * 3, 3) })
                             } else warnings += "Неполное описание частот UAC1"
                         } else if (version in 0x200..0x2ff && size >= 6) {
-                            formats += UsbStreamFormat(iface, alternate, version, channels, b(5), b(4), emptyList())
+                            formats += UsbStreamFormat(iface, alternate, version, channels, b(5), b(4), emptyList(), terminal = terminal, pcm = pcm)
                         }
                     }
                 }
             }
             offset += size
         }
-        return UsbAudioDescription(versions, clocks.distinct(), volumes.distinct(), formats.distinct(), warnings.distinct())
+        return UsbAudioDescription(versions, clocks.distinct(), volumes.distinct(), formats.distinct(), warnings.distinct(), nodes)
     }
 }
 

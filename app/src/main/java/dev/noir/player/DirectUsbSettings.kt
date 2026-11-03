@@ -10,6 +10,7 @@ object DirectUsbSettings {
     val status = MutableStateFlow("Android · прямой USB выключен")
     val report = MutableStateFlow("")
     val owned = MutableStateFlow(false)
+    val device = MutableStateFlow("USB-ЦАП")
     val failure = MutableStateFlow<String?>(null)
     val decodedHash = MutableStateFlow("")
     private lateinit var prefs: android.content.SharedPreferences

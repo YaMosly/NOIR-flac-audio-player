@@ -127,7 +127,8 @@ private fun NoirScreen(library: LibraryStore) {
     val diagnostics = remember { AudioDiagnostics(context) }
     val systemOutput by diagnostics.state.collectAsStateWithLifecycle()
     val directOwned by DirectUsbSettings.owned.collectAsStateWithLifecycle()
-    val output = if (directOwned) systemOutput.copy(device = "ddHiFi · прямой USB", usb = true) else systemOutput
+    val directDevice by DirectUsbSettings.device.collectAsStateWithLifecycle()
+    val output = if (directOwned) systemOutput.copy(device = "$directDevice · прямой USB", usb = true) else systemOutput
     val usbDiagnostics = remember { UsbDiagnostics(context) }
     val usbProbe by usbDiagnostics.state.collectAsStateWithLifecycle()
     val usbPreview = remember { UsbDirectPreview(context) }
@@ -362,6 +363,7 @@ private fun AudioPanel(track: Track?, output: OutputState, probe: UsbProbeState,
         Switch(direct, { if (it) access.enable() else DirectUsbSettings.setEnabled(false) }, enabled = !usbLocked && !probe.busy && !preview.busy)
     }
     Text(directStatus, color = Accent, fontSize = 13.sp)
+    if (direct) TextButton(onClick = { DirectUsbSettings.setEnabled(false) }, enabled = !usbLocked) { Text("Использовать системный вывод Android") }
     Text("После включения нажми обычную кнопку Play. Работают очередь, пауза, перемотка и экран блокировки. Смена режима ставит музыку на паузу. Частота и разрядность следуют за треком; ЦАП должен подтвердить формат.", color = Muted, fontSize = 13.sp)
     if (direct && !normalOwns) TextButton(onClick = access::enable, enabled = !usbLocked) { Text("Разрешить доступ к ЦАПу") }
     if (normalOwns) Text("Для отдельных проверок ниже сначала выключи прямой USB основного плеера.", color = Muted, fontSize = 12.sp)
