@@ -19,6 +19,7 @@ object SmartShuffle {
     fun choose(
         tracks: List<Track>, recent: List<String>, scores: Map<String, ListeningScore>,
         artistScores: Map<String, ListeningScore>, smart: Boolean, now: Long, random: Random = Random.Default,
+        preferences: ListeningPreferences = ListeningPreferences(),
     ): Track? {
         if (tracks.isEmpty()) return null
         val avoid = recent.takeLast(minOf(30, max(0, tracks.size - 1))).toSet()
@@ -29,7 +30,7 @@ object SmartShuffle {
                 // Require repeated skips before affecting an entire artist; unknown tags are never grouped.
                 val artist = artistScores[track.artist.lowercase(java.util.Locale.ROOT)]?.decayed(now)
                 val artistWeight = if (track.artist != UNKNOWN_ARTIST && artist != null && artist.skips >= 3) artist.weight(now) else 1.0
-                (trackWeight * artistWeight).coerceAtLeast(.08)
+                (trackWeight * artistWeight * preferences.weight(track)).coerceAtLeast(.005)
             }
         }
         var pick = random.nextDouble() * weights.sum()

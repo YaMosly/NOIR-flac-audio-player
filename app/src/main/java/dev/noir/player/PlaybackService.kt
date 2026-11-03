@@ -83,17 +83,18 @@ class PlaybackService : MediaSessionService() {
                     runCatching {
                         val tracks = withTimeout(5_000) { library.tracks.first { it.isNotEmpty() } }
                         val start = tracks.firstOrNull { it.id == library.restoreId } ?: tracks.first()
-                        MediaSession.MediaItemsWithStartPosition(buildQueue(start, tracks), 0, library.restorePosition)
+                        MediaSession.MediaItemsWithStartPosition(restoredQueue(start, tracks), 0, library.restorePosition)
                     }.onSuccess { result.set(it) }.onFailure { result.setException(it) }
                 }
                 return result
             }
             override fun onAddMediaItems(mediaSession: MediaSession, controller: MediaSession.ControllerInfo, mediaItems: List<MediaItem>): ListenableFuture<List<MediaItem>> {
-                val resolved = mediaItems.mapNotNull { item -> library.tracks.value.firstOrNull { it.id == item.mediaId }?.toMediaItem() }
+                val resolved = mediaItems.mapNotNull { item -> library.tracks.value.firstOrNull { it.id == item.mediaId }?.toQueueItem(item.isAutomaticQueueItem()) }
                 return com.google.common.util.concurrent.Futures.immediateFuture(resolved)
             }
         }).build()
         player.addListener(object : Player.Listener {
+            override fun onTimelineChanged(timeline: Timeline, reason: Int) { if (!changingQueue) savePlaybackState() }
             override fun onPlayWhenReadyChanged(playWhenReady: Boolean, reason: Int) {
                 if (playWhenReady && UsbPlaybackInterlock.active.value) { player.pause(); player.stop() }
                 if (!playWhenReady && DirectUsbSettings.enabled.value && reason == Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS) {
@@ -102,7 +103,7 @@ class PlaybackService : MediaSessionService() {
                 }
             }
             override fun onPositionDiscontinuity(old: Player.PositionInfo, new: Player.PositionInfo, reason: Int) {
-                if (changingQueue || old.mediaItem?.mediaId == new.mediaItem?.mediaId) return
+                if (changingQueue || old.mediaItem?.mediaId == new.mediaItem?.mediaId && old.mediaItemIndex == new.mediaItemIndex) return
                 val track = library.tracks.value.firstOrNull { it.id == old.mediaItem?.mediaId } ?: return
                 // A seek inside a song and a library replacement never count as dislike.
                 if (reason == Player.DISCONTINUITY_REASON_SEEK || reason == Player.DISCONTINUITY_REASON_AUTO_TRANSITION) {
@@ -143,11 +144,11 @@ class PlaybackService : MediaSessionService() {
                 } else if (player.mediaItemCount == 0 || tracks.none { it.id == player.currentMediaItem?.mediaId }) {
                     player.pause()
                     val start = tracks.firstOrNull { it.id == library.restoreId } ?: tracks.first()
-                    replaceQueue(start, tracks, library.restorePosition)
+                    replaceQueue(start, tracks, library.restorePosition, restore = true)
                 } else refreshFuture()
             }
         }
-        scope.launch { while (isActive) { delay(5_000); if (player.mediaItemCount > 0) library.savePosition(player.currentMediaItem?.mediaId, player.currentPosition) } }
+        scope.launch { while (isActive) { delay(5_000); if (player.mediaItemCount > 0) savePlaybackState() } }
         scope.launch {
             DirectUsbSettings.enabled.drop(1).collect {
                 player.setHandleAudioBecomingNoisy(!it)
@@ -158,6 +159,7 @@ class PlaybackService : MediaSessionService() {
             }
         }
         scope.launch { DirectUsbSettings.db.drop(1).collect { withContext(Dispatchers.IO) { outputs.refreshVolume() } } }
+        scope.launch { library.recommendationRevision.drop(1).collect { refreshFuture(rebuildAutomatic = true) } }
         scope.launch { DirectUsbSettings.failure.collect { if (it != null && DirectUsbSettings.enabled.value) { player.pause(); player.stop(); saveAndUpdateWidget() } } }
     }
 
@@ -165,30 +167,47 @@ class PlaybackService : MediaSessionService() {
         val items = mutableListOf(first.toMediaItem())
         val avoid = recent.toMutableList().apply { add(first.id) }
         repeat(3) {
-            SmartShuffle.choose(playable(tracks), avoid, library.scores, library.artistScores, library.smart.value, System.currentTimeMillis())?.let { items.add(it.toMediaItem()); avoid.add(it.id) }
+            choose(tracks, avoid)?.let { items.add(it.toQueueItem(automatic = true)); avoid.add(it.id) }
         }
         return items
     }
 
-    private fun replaceQueue(start: Track, tracks: List<Track>, position: Long = 0L) {
+    private fun restoredQueue(start: Track, tracks: List<Track>): List<MediaItem> {
+        val saved = library.savedQueue()
+        if (saved.firstOrNull()?.id != start.id) return buildQueue(start, tracks)
+        val byId = playable(tracks).associateBy { it.id }
+        val items = saved.mapNotNull { entry -> byId[entry.id]?.toQueueItem(entry.automatic) }
+        return items.takeIf { it.firstOrNull()?.mediaId == start.id } ?: buildQueue(start, tracks)
+    }
+
+    private fun replaceQueue(start: Track, tracks: List<Track>, position: Long = 0L, restore: Boolean = false) {
         changingQueue = true
-        player.setMediaItems(buildQueue(start, tracks), 0, position.coerceIn(0, (start.durationMs - 1).coerceAtLeast(0)))
+        player.setMediaItems(if (restore) restoredQueue(start, tracks) else buildQueue(start, tracks), 0, position.coerceIn(0, (start.durationMs - 1).coerceAtLeast(0)))
         player.prepare()
         changingQueue = false
         saveAndUpdateWidget()
     }
 
-    private fun refreshFuture() {
+    private fun choose(tracks: List<Track>, avoid: List<String>) = SmartShuffle.choose(playable(tracks), avoid, library.scores, library.artistScores, library.smart.value, System.currentTimeMillis(), preferences = library.preferences.value)
+
+    private fun refreshFuture(rebuildAutomatic: Boolean = false) {
         if (changingQueue || library.tracks.value.isEmpty() || player.currentMediaItem == null) return
         changingQueue = true
         val index = player.currentMediaItemIndex
-        if (index + 1 < player.mediaItemCount) player.removeMediaItems(index + 1, player.mediaItemCount)
-        val avoid = recent.toMutableList()
-        repeat(3) {
-            SmartShuffle.choose(playable(library.tracks.value), avoid, library.scores, library.artistScores, library.smart.value, System.currentTimeMillis())?.let { player.addMediaItem(it.toMediaItem()); avoid.add(it.id) }
+        for (i in player.mediaItemCount - 1 downTo index + 1) {
+            val item = player.getMediaItemAt(i)
+            val track = library.tracks.value.firstOrNull { it.id == item.mediaId }
+            if (track == null || DirectUsbSettings.enabled.value && !UsbPcmProfile.supports(track) || rebuildAutomatic && item.isAutomaticQueueItem()) player.removeMediaItem(i)
+        }
+        val avoid = recent.toMutableList().apply {
+            for (i in index until player.mediaItemCount) add(player.getMediaItemAt(i).mediaId)
+        }
+        repeat((3 - (player.mediaItemCount - index - 1)).coerceAtLeast(0)) {
+            choose(library.tracks.value, avoid)?.let { player.addMediaItem(it.toQueueItem(automatic = true)); avoid.add(it.id) }
         }
         if (player.currentMediaItemIndex > 50) player.removeMediaItems(0, player.currentMediaItemIndex - 20)
         changingQueue = false
+        savePlaybackState()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -204,7 +223,7 @@ class PlaybackService : MediaSessionService() {
                 ACTION_NEXT -> { player.seekToNextMediaItem(); player.play() }
                 ACTION_PREVIOUS -> { player.seekToPrevious(); player.play() }
                 ACTION_RANDOM -> {
-                    val track = SmartShuffle.choose(playable(tracks), recent.toList(), library.scores, library.artistScores, library.smart.value, System.currentTimeMillis()) ?: tracks.first()
+                    val track = choose(tracks, recent.toList()) ?: tracks.first()
                     replaceQueue(track, tracks); player.play()
                 }
             }
@@ -213,15 +232,24 @@ class PlaybackService : MediaSessionService() {
     }
 
     private fun saveAndUpdateWidget() {
-        library.savePosition(player.currentMediaItem?.mediaId, player.currentPosition)
+        savePlaybackState()
         NoirWidget.update(this, player.currentMediaItem?.mediaMetadata, player.isPlaying)
+    }
+    private fun savePlaybackState() {
+        if (changingQueue) return
+        val index = player.currentMediaItemIndex
+        if (index < 0 || index >= player.mediaItemCount) return
+        val entries = (index until player.mediaItemCount).map {
+            player.getMediaItemAt(it).let { item -> SavedQueueEntry(item.mediaId, item.isAutomaticQueueItem()) }
+        }
+        library.saveQueue(entries, player.currentPosition)
     }
     private fun playable(tracks: List<Track>) = if (DirectUsbSettings.enabled.value) tracks.filter { UsbPcmProfile.supports(it) } else tracks
 
     override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession = session
     override fun onDestroy() {
         UsbPlaybackInterlock.stopPlayback = null
-        library.savePosition(player.currentMediaItem?.mediaId, player.currentPosition)
+        savePlaybackState()
         NoirWidget.update(this, player.currentMediaItem?.mediaMetadata, false)
         audioManager.unregisterAudioDeviceCallback(devices)
         unregisterReceiver(detached)

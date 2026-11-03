@@ -44,12 +44,15 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.currentStateAsState
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.repeatOnLifecycle
 import androidx.media3.common.Player
 import androidx.media3.session.MediaController
 import androidx.media3.session.SessionToken
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.util.Locale
 
 private val Ink = Color(0xFF0A0B0E)
@@ -96,6 +99,7 @@ private data class PlaybackUi(val id: String? = null, val playing: Boolean = fal
 
 @Composable
 private fun playbackUi(controller: MediaController?): PlaybackUi {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     var state by remember { mutableStateOf(PlaybackUi()) }
     DisposableEffect(controller) {
         fun update() { state = PlaybackUi(controller?.currentMediaItem?.mediaId, controller?.isPlaying == true, controller?.currentPosition ?: 0, controller?.duration?.coerceAtLeast(0) ?: 0, controller?.playerError?.let { if (DirectUsbSettings.enabled.value) "Прямой USB: ${DirectUsbSettings.failure.value ?: "проверь доступ к ЦАПу и формат трека"}. Подробности — в звуковом тракте." else "Не удалось воспроизвести трек. Проверь доступ к папке." }, controller?.playbackState == Player.STATE_BUFFERING) }
@@ -103,7 +107,11 @@ private fun playbackUi(controller: MediaController?): PlaybackUi {
         controller?.addListener(listener); update()
         onDispose { controller?.removeListener(listener) }
     }
-    LaunchedEffect(controller) { while (true) { delay(400); state = state.copy(position = controller?.currentPosition ?: 0, duration = controller?.duration?.coerceAtLeast(0) ?: 0) } }
+    LaunchedEffect(controller, lifecycle) {
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) { delay(400); state = state.copy(position = controller?.currentPosition ?: 0, duration = controller?.duration?.coerceAtLeast(0) ?: 0) }
+        }
+    }
     return state
 }
 
@@ -120,10 +128,21 @@ private fun NoirScreen(library: LibraryStore) {
     val usbFailure by DirectUsbSettings.failure.collectAsStateWithLifecycle()
     val directMode by DirectUsbSettings.enabled.collectAsStateWithLifecycle()
     val current = tracks.firstOrNull { it.id == playback.id }
+    val preferences by library.preferences.collectAsStateWithLifecycle()
+    val uiScope = rememberCoroutineScope()
+    val snackbar = remember { SnackbarHostState() }
+    fun preferenceFeedback(reduced: Boolean, undo: () -> Unit) {
+        snackbar.currentSnackbarData?.dismiss()
+        uiScope.launch {
+            val message = if (!smart) "Предпочтение сохранено · включи умное перемешивание" else if (reduced) "Будем предлагать реже" else "Обычный шанс восстановлен"
+            if (snackbar.showSnackbar(message, actionLabel = "Отменить", duration = SnackbarDuration.Long) == SnackbarResult.ActionPerformed) undo()
+        }
+    }
     var showLibrary by remember { mutableStateOf(false) }
     var sheet by remember { mutableStateOf<String?>(null) }
     var pickerError by remember { mutableStateOf<String?>(null) }
     var search by remember { mutableStateOf("") }
+    val searchedTracks = remember(tracks, search) { TrackSearch.filter(tracks, search) }
     val diagnostics = remember { AudioDiagnostics(context) }
     val systemOutput by diagnostics.state.collectAsStateWithLifecycle()
     val directOwned by DirectUsbSettings.owned.collectAsStateWithLifecycle()
@@ -134,6 +153,7 @@ private fun NoirScreen(library: LibraryStore) {
     val usbPreview = remember { UsbDirectPreview(context) }
     val preview by usbPreview.state.collectAsStateWithLifecycle()
     val lifecycle = LocalLifecycleOwner.current.lifecycle
+    val lifecycleState by lifecycle.currentStateAsState()
     val usbLocked by UsbPlaybackInterlock.active.collectAsStateWithLifecycle()
     DisposableEffect(Unit) { diagnostics.start(); onDispose { diagnostics.close() } }
     DisposableEffect(Unit) { usbDiagnostics.start(); onDispose { usbDiagnostics.close() } }
@@ -166,11 +186,13 @@ private fun NoirScreen(library: LibraryStore) {
         controller?.let { if (it.isPlaying) it.pause() else { if (it.playbackState == Player.STATE_IDLE) it.prepare(); it.play() } }
     }
     Box(Modifier.fillMaxSize().background(Ink)) {
-        AmbientGlow(tint, playback.playing)
+        AmbientGlow(tint, playback.playing && lifecycleState.isAtLeast(Lifecycle.State.STARTED))
         Column(Modifier.fillMaxSize().safeDrawingPadding().padding(horizontal = 24.dp)) {
             Row(Modifier.fillMaxWidth().height(62.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceBetween) {
                 Text("N O I R", color = Paper, fontSize = 18.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 3.sp)
                 Row {
+                    if (tracks.isNotEmpty()) ToolButton(Icons.Outlined.QueueMusic, "Очередь", enabled = controller != null && !usbLocked) { sheet = "queue" }
+                    if (current != null) TrackActions(current, controller, library, controller != null && !usbLocked, ::preferenceFeedback)
                     ToolButton(if (showLibrary) Icons.Outlined.Close else Icons.Outlined.LibraryMusic, if (showLibrary) "Закрыть библиотеку" else "Библиотека") { showLibrary = !showLibrary }
                     ToolButton(Icons.Outlined.Tune, "Настройки") { sheet = "settings" }
                 }
@@ -182,11 +204,12 @@ private fun NoirScreen(library: LibraryStore) {
                     Column(Modifier.weight(1f)) { Text("Твоя музыка", fontSize = 30.sp, fontWeight = FontWeight.SemiBold, color = Paper); Text("${tracks.size} треков · ${folder ?: "Папка"}", color = Muted, fontSize = 13.sp) }
                     ToolButton(Icons.Outlined.FolderOpen, "Выбрать папку") { picker.launch(library.tree) }
                 }
-                OutlinedTextField(search, { search = it }, placeholder = { Text("Найти трек или исполнителя") }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(search, { search = it }, placeholder = { Text("Трек, исполнитель или альбом") }, leadingIcon = { Icon(Icons.Outlined.Search, null) }, singleLine = true, shape = RoundedCornerShape(16.dp), modifier = Modifier.fillMaxWidth())
                 Spacer(Modifier.height(12.dp))
                 TextButton(onClick = { randomPlay(); showLibrary = false }, enabled = controller != null && !usbLocked) { Icon(Icons.Rounded.Shuffle, null, Modifier.size(18.dp)); Spacer(Modifier.width(10.dp)); Text("Перемешать всё") }
+                if (searchedTracks.isEmpty()) Text("Ничего не найдено", color = Muted)
                 LazyColumn(Modifier.weight(1f)) {
-                    items(tracks.filter { search.isBlank() || it.title.contains(search, true) || it.artist.contains(search, true) }, key = { it.id }) { track ->
+                    items(searchedTracks, key = { it.id }) { track ->
                         Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable(enabled = controller != null && !usbLocked) {
                             controller?.setMediaItem(track.toMediaItem()); controller?.prepare(); controller?.play(); showLibrary = false
                         }.padding(vertical = 13.dp, horizontal = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -194,6 +217,7 @@ private fun NoirScreen(library: LibraryStore) {
                             Spacer(Modifier.width(14.dp))
                             Column(Modifier.weight(1f)) { Text(track.title, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Paper, fontSize = 15.sp); Text(track.artist, maxLines = 1, overflow = TextOverflow.Ellipsis, color = Muted, fontSize = 12.sp) }
                             Text(timeLabel(track.durationMs), color = Muted, fontSize = 12.sp)
+                            TrackActions(track, controller, library, controller != null && !usbLocked, ::preferenceFeedback)
                         }
                     }
                 }
@@ -209,14 +233,18 @@ private fun NoirScreen(library: LibraryStore) {
             }
             if (scan.scanning && tracks.isNotEmpty()) Text("Обновляю папку · ${scan.count} треков", fontSize = 12.sp, color = Muted, modifier = Modifier.padding(8.dp))
         }
-        if (sheet != null) ModalBottomSheet(onDismissRequest = { usbPreview.stop(); sheet = null }, containerColor = Surface, contentColor = Paper) {
+        if (sheet == "queue") ModalBottomSheet(onDismissRequest = { sheet = null }, containerColor = Surface, contentColor = Paper) {
+            QueuePanel(controller, tracks, !usbLocked)
+        }
+        if (sheet != null && sheet != "queue") ModalBottomSheet(onDismissRequest = { usbPreview.stop(); sheet = null }, containerColor = Surface, contentColor = Paper) {
             Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp).padding(bottom = 32.dp).verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(18.dp)) {
                 when (sheet) {
                     "settings" -> {
                         Text("Под тебя", fontSize = 26.sp, fontWeight = FontWeight.SemiBold)
                         Row(verticalAlignment = Alignment.CenterVertically) { Column(Modifier.weight(1f)) { Text("Умное перемешивание"); Text("Реже предлагает то, что ты часто пропускаешь", color = Muted, fontSize = 13.sp) }; Switch(smart, library::setSmart) }
                         Text("Учитываем пропуски после 2 секунд в начале трека. Несколько пропусков снижают частоту исполнителя. Предпочтения постепенно ослабевают; музыка не блокируется навсегда.", color = Muted, fontSize = 13.sp)
-                        TextButton(onClick = { library.resetLearning(); sheet = "reset" }) { Text("Сбросить историю предпочтений") }
+                        TextButton(onClick = { sheet = "preferences" }) { Text("Ручные предпочтения · ${preferences.tracks.size + preferences.artists.size}") }
+                        TextButton(onClick = { snackbar.currentSnackbarData?.dismiss(); library.resetLearning(); sheet = "reset" }) { Text("Сбросить историю предпочтений") }
                         HorizontalDivider(color = Muted.copy(alpha = .15f))
                         Text("Папка · ${folder ?: "Не выбрана"}", color = Muted)
                         TextButton(onClick = { sheet = null; picker.launch(library.tree) }, enabled = !scan.scanning) { Icon(Icons.Outlined.FolderOpen, null); Spacer(Modifier.width(10.dp)); Text("Выбрать папку") }
@@ -227,6 +255,18 @@ private fun NoirScreen(library: LibraryStore) {
                         Text("NOIR ${BuildConfig.VERSION_NAME} · Всё хранится на телефоне", color = Muted, fontSize = 12.sp)
                     }
                     "reset" -> { Text("Начинаем с чистого листа", fontSize = 23.sp); Text("История пропусков сброшена. У всех треков снова одинаковый шанс.", color = Muted) }
+                    "preferences" -> {
+                        Text("Предлагать реже", fontSize = 26.sp)
+                        Text("Ручные предпочтения действуют в умном перемешивании до отмены. Треки остаются доступными и иногда попадают в рандом.", color = Muted)
+                        if (preferences.tracks.isEmpty() && preferences.artists.isEmpty()) Text("Пока нет ручных предпочтений", color = Muted)
+                        preferences.tracks.sorted().forEach { id ->
+                            val title = tracks.firstOrNull { it.id == id }?.title ?: "Недоступный трек"
+                            TextButton(onClick = { library.setLessTrack(id, false) }) { Text("Вернуть трек: $title") }
+                        }
+                        preferences.artists.sorted().forEach { artist ->
+                            TextButton(onClick = { library.setLessArtist(artist, false) }) { Text("Вернуть исполнителя: $artist") }
+                        }
+                    }
                     "volume" -> VolumePanel()
                     "background" -> BackgroundPowerPanel()
                     "audio" -> AudioPanel(current, output, usbProbe, preview, usbLocked,
@@ -235,6 +275,7 @@ private fun NoirScreen(library: LibraryStore) {
                 }
             }
         }
+        SnackbarHost(snackbar, Modifier.align(Alignment.BottomCenter).safeDrawingPadding().padding(16.dp))
     }
 }
 
