@@ -257,7 +257,7 @@ private fun NoirScreen(library: LibraryStore) {
                         HorizontalDivider(color = Muted.copy(alpha = .15f))
                         Text("Папка · ${folder ?: "Не выбрана"}", color = Muted)
                         TextButton(onClick = { sheet = null; picker.launch(library.tree) }, enabled = !scan.scanning) { Icon(Icons.Outlined.FolderOpen, null); Spacer(Modifier.width(10.dp)); Text("Выбрать папку") }
-                        TextButton(onClick = { library.tree?.let(library::scanFolder) }, enabled = library.tree != null && !scan.scanning) { Text("Обновить библиотеку") }
+                        TextButton(onClick = library::refreshFolder, enabled = library.tree != null && !scan.scanning) { Text("Обновить библиотеку") }
                         scan.message?.let { Text(it, color = Muted, fontSize = 13.sp) }
                         TextButton(onClick = { sheet = "background" }) { Text("Работа при выключенном экране") }
                         TextButton(onClick = { diagnostics.refresh(); sheet = "audio" }) { Text("Звуковой тракт и USB-ЦАП") }

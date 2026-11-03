@@ -107,8 +107,8 @@ class PlaybackService : MediaSessionService() {
                 scope.launch {
                     runCatching {
                         val tracks = withTimeout(5_000) { library.tracks.first { it.isNotEmpty() } }
-                        val start = tracks.firstOrNull { it.id == library.restoreId } ?: tracks.first()
-                        MediaSession.MediaItemsWithStartPosition(restoredQueue(start, tracks), 0, library.restorePosition)
+                        val start = restoredStart(tracks, library.savedQueue(), library.restoreId)
+                        MediaSession.MediaItemsWithStartPosition(restoredQueue(start, tracks), 0, if (start.id == library.restoreId) library.restorePosition else 0)
                     }.onSuccess { result.set(it) }.onFailure { result.setException(it) }
                 }
                 return result
@@ -170,8 +170,8 @@ class PlaybackService : MediaSessionService() {
                     if (player.mediaItemCount > 0) { player.pause(); player.clearMediaItems() }
                 } else if (player.mediaItemCount == 0 || tracks.none { it.id == player.currentMediaItem?.mediaId }) {
                     player.pause()
-                    val start = tracks.firstOrNull { it.id == library.restoreId } ?: tracks.first()
-                    replaceQueue(start, tracks, library.restorePosition, restore = true)
+                    val start = restoredStart(tracks, library.savedQueue(), library.restoreId)
+                    replaceQueue(start, tracks, if (start.id == library.restoreId) library.restorePosition else 0, restore = true)
                 } else refreshFuture()
             }
         }
@@ -206,7 +206,6 @@ class PlaybackService : MediaSessionService() {
 
     private fun restoredQueue(start: Track, tracks: List<Track>): List<MediaItem> {
         val saved = library.savedQueue()
-        if (saved.firstOrNull()?.id != start.id) return buildQueue(start, tracks)
         val byId = playable(tracks).associateBy { it.id }
         val items = saved.mapNotNull { entry -> byId[entry.id]?.toQueueItem(entry.automatic, entry.album) }
         return items.takeIf { it.firstOrNull()?.mediaId == start.id } ?: buildQueue(start, tracks)
@@ -250,8 +249,8 @@ class PlaybackService : MediaSessionService() {
             val tracks = withTimeoutOrNull(5_000) { library.tracks.first { it.isNotEmpty() } }
             if (tracks == null) { stopSelf(startId); return@launch }
             if (player.mediaItemCount == 0) {
-                val start = tracks.firstOrNull { it.id == library.restoreId } ?: tracks.first()
-                replaceQueue(start, tracks, library.restorePosition, restore = true)
+                val start = restoredStart(tracks, library.savedQueue(), library.restoreId)
+                replaceQueue(start, tracks, if (start.id == library.restoreId) library.restorePosition else 0, restore = true)
             }
             when (command) {
                 ACTION_PLAY -> if (player.isPlaying) player.pause() else { if (player.playbackState == Player.STATE_IDLE) player.prepare(); player.play() }
@@ -299,6 +298,11 @@ class PlaybackService : MediaSessionService() {
         const val ACTION_PREVIOUS = "dev.noir.PREVIOUS"
         const val ACTION_RANDOM = "dev.noir.RANDOM"
     }
+}
+
+fun restoredStart(tracks: List<Track>, saved: List<SavedQueueEntry>, currentId: String?): Track {
+    val byId = tracks.associateBy { it.id }
+    return byId[currentId] ?: saved.firstNotNullOfOrNull { byId[it.id] } ?: tracks.first()
 }
 
 fun pauseForUsbLoss(player: Player) {

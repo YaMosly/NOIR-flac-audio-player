@@ -8,7 +8,7 @@ args=p.parse_args()
 root=Path(__file__).resolve().parent.parent
 logs=root/'build'/'emulator-checks';logs.mkdir(parents=True,exist_ok=True)
 def adb(*parts):
-    return subprocess.run([args.adb,'-s',args.serial,*parts],check=True,capture_output=True,text=True).stdout
+    return subprocess.run([args.adb,'-s',args.serial,*parts],check=True,capture_output=True,text=True,encoding='utf-8',errors='replace').stdout
 assert adb('shell','getprop','ro.kernel.qemu').strip()=='1','Requires the dedicated emulator'
 assert adb('emu','avd','name').splitlines()[0].strip() in {'NoirCompat37','NoirCompat36','noir-api36'},'Refusing an unrelated AVD'
 adb('install','-r',str(root/'app/build/outputs/apk/debug/app-debug.apk'))

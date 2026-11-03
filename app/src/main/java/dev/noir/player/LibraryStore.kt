@@ -53,6 +53,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
     private var scanJob: Job? = null
     private var scanUri: Uri? = null
     private var queuedRefresh = false
+    private var queuedForce = false
     private var visible = false
     private var foregroundJob: Job? = null
     private var observerJob: Job? = null
@@ -145,12 +146,14 @@ class LibraryStore(private val context: Context) : AutoCloseable {
         if (earlySkip) recommendationRevision.value++
     }
 
-    fun scanFolder(uri: Uri) {
+    fun scanFolder(uri: Uri) = scanFolderInternal(uri, false)
+    fun refreshFolder() { tree?.let { scanFolderInternal(it, true) } }
+    private fun scanFolderInternal(uri: Uri, forceMetadata: Boolean) {
         if (scanJob?.isActive == true) {
-            if (scanUri == uri) { queuedRefresh = true; return }
+            if (scanUri == uri) { queuedRefresh = true; queuedForce = queuedForce || forceMetadata; return }
             scanJob?.cancel()
         }
-        scanUri = uri; queuedRefresh = false
+        scanUri = uri; queuedRefresh = false; queuedForce = false
         scanJob = scope.launch {
             loaded.await()
             val previous = if (tree == uri) mutableTracks.value.associateBy { it.id } else emptyMap()
@@ -187,7 +190,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
                             val size = if (it.isNull(3)) 0L else it.getLong(3)
                             val modified = if (it.isNull(4)) 0L else it.getLong(4)
                             val old = previous[fileUri.toString()]
-                            if (old != null && size > 0 && modified > 0 && old.fileSize == size && old.modified == modified) {
+                            if (!forceMetadata && old != null && size > 0 && modified > 0 && old.fileSize == size && old.modified == modified) {
                                 result += old
                             } else {
                                 val info = runCatching { context.contentResolver.openInputStream(fileUri)?.buffered()?.use { stream -> FlacMetadata.read(stream) } }.getOrNull()
@@ -222,7 +225,7 @@ class LibraryStore(private val context: Context) : AutoCloseable {
                 scan.value = ScanState(count = mutableTracks.value.size, message = "Не удалось полностью прочитать папку. Сохранённая библиотека оставлена; проверь доступ и обнови её.")
             }
             scanJob = null
-            if (queuedRefresh) { queuedRefresh = false; scanFolder(uri) }
+            if (queuedRefresh) { val force = queuedForce; queuedRefresh = false; queuedForce = false; scanFolderInternal(uri, force) }
         }
     }
 

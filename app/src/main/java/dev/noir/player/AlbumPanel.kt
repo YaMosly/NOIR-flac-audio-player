@@ -16,7 +16,7 @@ fun AlbumPanel(matches: List<Track>, library: List<Track>, controller: MediaCont
     val albums = remember(matches) { matches.filter { AlbumOrder.key(it) != null }.distinctBy { AlbumOrder.key(it) }.sortedBy { it.album.lowercase(java.util.Locale.ROOT) } }
     LazyColumn(modifier) {
         if (albums.isEmpty()) item { Text("Нет альбомов с заполненными тегами", modifier = Modifier.padding(vertical = 16.dp)) }
-        items(albums, key = { AlbumOrder.key(it).toString() }) { first ->
+        items(albums, key = { it.id }) { first ->
             val tracks = remember(first, library) { AlbumOrder.tracks(first, library) }
             Column(Modifier.fillMaxWidth().clickable(enabled = enabled) {
                 controller?.let { it.setMediaItems(tracks.map { track -> track.toQueueItem(false, album = true) }); it.prepare(); it.play(); onPlay() }

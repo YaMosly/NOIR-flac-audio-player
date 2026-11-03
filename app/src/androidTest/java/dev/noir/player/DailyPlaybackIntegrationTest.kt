@@ -70,12 +70,14 @@ class DailyPlaybackIntegrationTest {
             ScanFixtureProvider.reads.set(0)
             scan();assertEquals(2,target.tracks.value.size);assertEquals(2,ScanFixtureProvider.reads.get())
             scan();assertEquals("Unchanged metadata was decoded again",2,ScanFixtureProvider.reads.get())
+            main{target.refreshFolder()};waitFor{!target.scan.value.scanning}
+            assertEquals("Manual refresh must bypass stale provider timestamps",4,ScanFixtureProvider.reads.get())
             val changed=File(folder,"0.flac")
             assertTrue(changed.setLastModified(changed.lastModified()+2_000))
-            scan();assertEquals("Changed metadata was not reread",3,ScanFixtureProvider.reads.get())
+            scan();assertEquals("Changed metadata was not reread",5,ScanFixtureProvider.reads.get())
             File(folder,"1.flac").delete();File(folder,"0.flac").copyTo(File(folder,"2.flac"))
             scan();assertEquals(2,target.tracks.value.size);assertTrue(target.tracks.value.any{it.id.endsWith("2.flac")});assertFalse(target.tracks.value.any{it.id.endsWith("1.flac")})
-            assertEquals(4,ScanFixtureProvider.reads.get())
+            assertEquals(6,ScanFixtureProvider.reads.get())
             val snapshot=target.tracks.value
             ScanFixtureProvider.incomplete=true
             main{target.scanFolder(uri)};waitFor{!target.scan.value.scanning && target.scan.value.message!=null}

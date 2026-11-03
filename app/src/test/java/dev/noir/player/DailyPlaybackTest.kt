@@ -29,4 +29,11 @@ class DailyPlaybackTest {
         assertFalse(DacVolumeProfiles.key(1,2,"sensitive-unit").contains("sensitive-unit"))
         assertEquals(DacVolumeProfiles.key(1,2,null),DacVolumeProfiles.key(1,2,""))
     }
+    @Test fun deletedCurrentItemRestoresTheNextSurvivingManualChoice() {
+        val a=Track("a","a","A");val b=Track("b","b","B")
+        val saved=listOf(SavedQueueEntry("deleted",false),SavedQueueEntry("b",false),SavedQueueEntry("a",false))
+        assertEquals(b,restoredStart(listOf(a,b),saved,"deleted"))
+        assertEquals(a,restoredStart(listOf(a,b),saved,"a"))
+        assertEquals(a,restoredStart(listOf(a,b),emptyList(),"deleted"))
+    }
 }
