@@ -17,6 +17,7 @@ class UsbPlaybackAccess(private val context: Context) : AutoCloseable {
             pending = null
             val device = manager.deviceList[id]
             if (device != null && manager.hasPermission(device) && !UsbPlaybackInterlock.active.value) {
+                DirectUsbSettings.bindDevice(device.vendorId, device.productId, runCatching { device.serialNumber }.getOrNull(), device.deviceName)
                 DirectUsbSettings.setEnabled(true)
                 DirectUsbSettings.status.value = "Прямой USB включён · нажми Play"
             } else DirectUsbSettings.status.value = "USB-доступ не получен · повтори включение"
@@ -30,6 +31,7 @@ class UsbPlaybackAccess(private val context: Context) : AutoCloseable {
         }
         DirectUsbSettings.failure.value = null
         if (manager.hasPermission(device)) {
+            DirectUsbSettings.bindDevice(device.vendorId, device.productId, runCatching { device.serialNumber }.getOrNull(), device.deviceName)
             DirectUsbSettings.setEnabled(true)
             DirectUsbSettings.status.value = "Прямой USB включён · нажми Play"
         } else {

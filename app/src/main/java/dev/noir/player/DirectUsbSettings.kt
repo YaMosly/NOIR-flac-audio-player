@@ -14,13 +14,36 @@ object DirectUsbSettings {
     val failure = MutableStateFlow<String?>(null)
     val decodedHash = MutableStateFlow("")
     private lateinit var prefs: android.content.SharedPreferences
+    private var profile: String? = null
+    var activeDeviceName: String? = null
+        private set
     fun initialize(context: Context) {
         prefs = context.getSharedPreferences("direct_usb", Context.MODE_PRIVATE)
         enabled.value = prefs.getBoolean("enabled", false)
-        db.value = prefs.getInt("db", -35).coerceIn(-50, 0)
+        // Legacy global levels are deliberately not copied onto an unknown DAC.
+        profile = null; activeDeviceName = null; db.value = -35
     }
     fun setEnabled(value: Boolean) { prefs.edit().putBoolean("enabled", value).apply(); enabled.value = value }
-    fun setDb(value: Int) { db.value = value.coerceIn(-50, 0); prefs.edit().putInt("db", db.value).apply() }
+    @Synchronized fun bindDevice(vendor: Int, product: Int, serial: String?, name: String) {
+        val key = DacVolumeProfiles.key(vendor, product, serial)
+        activeDeviceName = name
+        if (profile == key) return
+        profile = key
+        db.value = prefs.getInt("volume_$key", -35).coerceIn(-50, 0)
+    }
+    @Synchronized fun setDb(value: Int) {
+        db.value = value.coerceIn(-50, 0)
+        profile?.let { prefs.edit().putInt("volume_$it", db.value).apply() }
+    }
+}
+
+object DacVolumeProfiles {
+    fun key(vendor: Int, product: Int, serial: String?): String {
+        val unit = serial?.takeIf(String::isNotBlank)?.let {
+            java.security.MessageDigest.getInstance("SHA-256").digest(it.toByteArray(Charsets.UTF_8)).joinToString("") { b -> "%02x".format(b) }
+        } ?: "model"
+        return "$vendor:$product:$unit"
+    }
 }
 
 /** One hardware connection owner, including diagnostics, across both loopers. */

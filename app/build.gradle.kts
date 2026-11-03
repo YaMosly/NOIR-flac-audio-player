@@ -9,8 +9,8 @@ android {
         applicationId = "dev.noir.player"
         minSdk = 34
         targetSdk = 37
-        versionCode = 14
-        versionName = "0.8.0"
+        versionCode = 15
+        versionName = "0.9.0"
         testInstrumentationRunner = if (providers.gradleProperty("noirReleaseProbe").isPresent) "dev.noir.player.ReleaseProbeInstrumentation" else "androidx.test.runner.AndroidJUnitRunner"
         ndk { abiFilters += listOf("arm64-v8a", "x86_64") }
     }

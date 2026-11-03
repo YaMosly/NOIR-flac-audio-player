@@ -29,7 +29,9 @@ class PlaybackService : MediaSessionService() {
     private lateinit var outputs: NoirAudioOutputProvider
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private val library get() = (application as NoirApp).library
-    private val recent = ArrayDeque<String>()
+    private val recent get() = library.history
+    private var reconnectPending = false
+    private var reconnectJob: Job? = null
     private var changingQueue = false
     private var usbWasPresent = false
     private val audioManager by lazy { getSystemService(AudioManager::class.java) }
@@ -38,7 +40,30 @@ class PlaybackService : MediaSessionService() {
     }
     private val detached = object : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
-            if (intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED) { player.pause(); if (DirectUsbSettings.enabled.value) player.stop() }
+            val device = intent.getParcelableExtra(UsbManager.EXTRA_DEVICE, android.hardware.usb.UsbDevice::class.java) ?: return
+            if (intent.action == UsbManager.ACTION_USB_DEVICE_DETACHED) {
+                if (DirectUsbSettings.enabled.value && device.deviceName == DirectUsbSettings.activeDeviceName) {
+                    reconnectPending = true; reconnectJob?.cancel()
+                    pauseAndReleaseUsb()
+                    DirectUsbSettings.status.value = "ЦАП отключён · позиция сохранена"
+                }
+            } else if (intent.action == UsbManager.ACTION_USB_DEVICE_ATTACHED && reconnectPending && DirectUsbSettings.enabled.value) {
+                reconnectJob?.cancel()
+                reconnectJob = scope.launch {
+                    val manager = getSystemService(UsbManager::class.java)
+                    val selected = runCatching { UsbPlaybackDevices.select(manager) }.getOrNull() ?: return@launch
+                    if (!manager.hasPermission(selected)) {
+                        DirectUsbSettings.status.value = "ЦАП подключён · разреши USB-доступ в звуковом тракте"
+                        return@launch
+                    }
+                    if (withTimeoutOrNull(5_000) { DirectUsbSettings.owned.first { !it } } == null) return@launch
+                    if (!reconnectPending || !DirectUsbSettings.enabled.value || UsbPlaybackInterlock.active.value) return@launch
+                    DirectUsbSettings.bindDevice(selected.vendorId, selected.productId, runCatching { selected.serialNumber }.getOrNull(), selected.deviceName)
+                    DirectUsbSettings.failure.value = null
+                    if (player.mediaItemCount > 0) player.prepare()
+                    DirectUsbSettings.status.value = "ЦАП подключён · нажми Play для продолжения"
+                }
+            }
         }
     }
     private val devices = object : AudioDeviceCallback() {
@@ -89,7 +114,7 @@ class PlaybackService : MediaSessionService() {
                 return result
             }
             override fun onAddMediaItems(mediaSession: MediaSession, controller: MediaSession.ControllerInfo, mediaItems: List<MediaItem>): ListenableFuture<List<MediaItem>> {
-                val resolved = mediaItems.mapNotNull { item -> library.tracks.value.firstOrNull { it.id == item.mediaId }?.toQueueItem(item.isAutomaticQueueItem()) }
+                val resolved = mediaItems.mapNotNull { item -> library.tracks.value.firstOrNull { it.id == item.mediaId }?.toQueueItem(item.isAutomaticQueueItem(), item.isAlbumQueueItem()) }
                 return com.google.common.util.concurrent.Futures.immediateFuture(resolved)
             }
         }).build()
@@ -111,7 +136,7 @@ class PlaybackService : MediaSessionService() {
                 }
             }
             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
-                mediaItem?.mediaId?.let { recent.addLast(it); while (recent.size > 60) recent.removeFirst() }
+                mediaItem?.mediaId?.let(library::rememberPlayed)
                 // Refresh future choices after recording feedback; past items remain available for Back.
                 if (!changingQueue) refreshFuture()
                 if (mediaItem?.mediaMetadata?.artworkData == null) scope.launch {
@@ -126,6 +151,7 @@ class PlaybackService : MediaSessionService() {
                 saveAndUpdateWidget()
             }
             override fun onIsPlayingChanged(isPlaying: Boolean) {
+                if (isPlaying) reconnectPending = false
                 BackgroundAudioDiagnostics.record(this@PlaybackService, "isPlaying=$isPlaying")
                 saveAndUpdateWidget()
             }
@@ -135,7 +161,7 @@ class PlaybackService : MediaSessionService() {
             }
         })
         audioManager.registerAudioDeviceCallback(devices, Handler(Looper.getMainLooper()))
-        ContextCompat.registerReceiver(this, detached, IntentFilter(UsbManager.ACTION_USB_DEVICE_DETACHED), ContextCompat.RECEIVER_NOT_EXPORTED)
+        ContextCompat.registerReceiver(this, detached, IntentFilter().apply { addAction(UsbManager.ACTION_USB_DEVICE_DETACHED); addAction(UsbManager.ACTION_USB_DEVICE_ATTACHED) }, ContextCompat.RECEIVER_NOT_EXPORTED)
         scope.launch {
             combine(library.tracks, UsbPlaybackInterlock.active) { tracks, locked -> tracks to locked }.collect { (tracks, locked) ->
                 if (locked) return@collect
@@ -160,7 +186,12 @@ class PlaybackService : MediaSessionService() {
         }
         scope.launch { DirectUsbSettings.db.drop(1).collect { withContext(Dispatchers.IO) { outputs.refreshVolume() } } }
         scope.launch { library.recommendationRevision.drop(1).collect { refreshFuture(rebuildAutomatic = true) } }
-        scope.launch { DirectUsbSettings.failure.collect { if (it != null && DirectUsbSettings.enabled.value) { player.pause(); player.stop(); saveAndUpdateWidget() } } }
+        scope.launch { DirectUsbSettings.failure.collect { if (it != null && DirectUsbSettings.enabled.value) pauseAndReleaseUsb() } }
+    }
+
+    private fun pauseAndReleaseUsb() {
+        pauseForUsbLoss(player)
+        saveAndUpdateWidget()
     }
 
     private fun buildQueue(first: Track, tracks: List<Track>): List<MediaItem> {
@@ -176,7 +207,7 @@ class PlaybackService : MediaSessionService() {
         val saved = library.savedQueue()
         if (saved.firstOrNull()?.id != start.id) return buildQueue(start, tracks)
         val byId = playable(tracks).associateBy { it.id }
-        val items = saved.mapNotNull { entry -> byId[entry.id]?.toQueueItem(entry.automatic) }
+        val items = saved.mapNotNull { entry -> byId[entry.id]?.toQueueItem(entry.automatic, entry.album) }
         return items.takeIf { it.firstOrNull()?.mediaId == start.id } ?: buildQueue(start, tracks)
     }
 
@@ -202,7 +233,7 @@ class PlaybackService : MediaSessionService() {
         val avoid = recent.toMutableList().apply {
             for (i in index until player.mediaItemCount) add(player.getMediaItemAt(i).mediaId)
         }
-        repeat((3 - (player.mediaItemCount - index - 1)).coerceAtLeast(0)) {
+        repeat(if (player.currentMediaItem?.isAlbumQueueItem() == true) 0 else (3 - (player.mediaItemCount - index - 1)).coerceAtLeast(0)) {
             choose(library.tracks.value, avoid)?.let { player.addMediaItem(it.toQueueItem(automatic = true)); avoid.add(it.id) }
         }
         if (player.currentMediaItemIndex > 50) player.removeMediaItems(0, player.currentMediaItemIndex - 20)
@@ -233,14 +264,14 @@ class PlaybackService : MediaSessionService() {
 
     private fun saveAndUpdateWidget() {
         savePlaybackState()
-        NoirWidget.update(this, player.currentMediaItem?.mediaMetadata, player.isPlaying)
+        NoirWidget.update(this, player.currentMediaItem?.mediaMetadata, player.isPlaying, player.currentMediaItem?.mediaId)
     }
     private fun savePlaybackState() {
         if (changingQueue) return
         val index = player.currentMediaItemIndex
         if (index < 0 || index >= player.mediaItemCount) return
         val entries = (index until player.mediaItemCount).map {
-            player.getMediaItemAt(it).let { item -> SavedQueueEntry(item.mediaId, item.isAutomaticQueueItem()) }
+            player.getMediaItemAt(it).let { item -> SavedQueueEntry(item.mediaId, item.isAutomaticQueueItem(), item.isAlbumQueueItem()) }
         }
         library.saveQueue(entries, player.currentPosition)
     }
@@ -250,7 +281,7 @@ class PlaybackService : MediaSessionService() {
     override fun onDestroy() {
         UsbPlaybackInterlock.stopPlayback = null
         savePlaybackState()
-        NoirWidget.update(this, player.currentMediaItem?.mediaMetadata, false)
+        NoirWidget.update(this, player.currentMediaItem?.mediaMetadata, false, player.currentMediaItem?.mediaId)
         audioManager.unregisterAudioDeviceCallback(devices)
         unregisterReceiver(detached)
         unregisterReceiver(powerEvents)
@@ -266,6 +297,13 @@ class PlaybackService : MediaSessionService() {
     }
 }
 
+fun pauseForUsbLoss(player: Player) {
+    val index = player.currentMediaItemIndex
+    val position = player.currentPosition
+    player.pause(); player.stop()
+    if (index >= 0 && index < player.mediaItemCount) player.seekTo(index, position)
+}
+
 fun Track.toMediaItem(): MediaItem = MediaItem.Builder().setMediaId(id).setUri(id)
     .setTag(this)
-    .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album).setDurationMs(durationMs).build()).build()
+    .setMediaMetadata(MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album).setAlbumArtist(albumArtist).setDiscNumber(discNumber.takeIf { it > 0 }).setTrackNumber(trackNumber.takeIf { it > 0 }).setDurationMs(durationMs).build()).build()
