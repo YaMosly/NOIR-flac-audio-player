@@ -70,13 +70,21 @@ class PlaybackSmokeTest {
             main { finishingId = controller.currentMediaItem?.mediaId; controller.seekTo(18_800); controller.play() }
             eventually { controller.currentMediaItem?.mediaId != finishingId }
             main { assertTrue("A finished track must be recorded", (library.scores[finishingId]?.finishes ?: 0.0) > .9) }
+            // A media-item transition precedes READY/isPlaying. Start the background
+            // check from active playback rather than racing preparation of the next item.
+            eventually { controller.isPlaying && controller.currentPosition > 500 }
             // Leaving the activity and turning off the display must not stop the foreground player.
             shell("input keyevent 3")
             shell("input keyevent 223")
             var before = 0L; var beforeId: String? = null
             main { before = controller.currentPosition; beforeId = controller.currentMediaItem?.mediaId }
             Thread.sleep(3_000)
-            main { assertTrue(controller.isPlaying); assertNull(controller.playerError); assertTrue(controller.currentPosition > before + 1_000 || controller.currentMediaItem?.mediaId != beforeId) }
+            main {
+                val state = "state=${controller.playbackState}, playWhenReady=${controller.playWhenReady}, suppression=${controller.playbackSuppressionReason}, position=${controller.currentPosition}, before=$before, error=${controller.playerError}"
+                assertNull(state, controller.playerError)
+                assertTrue("Screen-off playback stopped: $state", controller.isPlaying)
+                assertTrue("Screen-off position did not advance: $state", controller.currentPosition > before + 1_000 || controller.currentMediaItem?.mediaId != beforeId)
+            }
             shell("input keyevent 224")
             main { controller.pause() }
             eventually { !controller.isPlaying }

@@ -134,8 +134,12 @@ extern "C" JNIEXPORT jlong JNICALL Java_dev_noir_player_NativeUsb_livePosition(J
 extern "C" JNIEXPORT jlong JNICALL Java_dev_noir_player_NativeUsb_liveBuffered(JNIEnv*, jobject, jlong handle) { return static_cast<jlong>(session(handle)->live.buffered()); }
 extern "C" JNIEXPORT jstring JNICALL Java_dev_noir_player_NativeUsb_streamLive(JNIEnv* env, jobject, jlong handle, jint endpoint, jint interval, jint maxPacket) {
     try {
-        if (!handle || endpoint != 4 || interval != 1 || speed(session(handle)) != USB_SPEED_HIGH || maxPacket < 24 || maxPacket > 1024) throw std::runtime_error("Unsupported live USB profile");
+        if (!handle || endpoint < 1 || endpoint > 15 || interval < 1 || interval > 4 || maxPacket < 1 || maxPacket > 1024) throw std::runtime_error("Unsupported live USB profile");
         auto* state = session(handle);
+        const int busSpeed = speed(state);
+        if (busSpeed != USB_SPEED_HIGH && busSpeed != USB_SPEED_FULL) throw std::runtime_error("Unsupported USB speed");
+        if (busSpeed == USB_SPEED_FULL && interval != 1) throw std::runtime_error("Unsupported full-speed interval");
+        const int intervals = (busSpeed == USB_SPEED_HIGH ? 8000 : 1000) / (1 << (interval - 1));
         if (!state->liveSlots) throw std::runtime_error("Live USB not configured");
         if (std::any_of(state->liveSlots->begin(), state->liveSlots->end(), [](const Slot& slot) { return slot.pending; })) throw std::runtime_error("Previous transfers still pending");
         const int forbid = ioctl(state->fd, USBDEVFS_FORBID_SUSPEND);
@@ -143,8 +147,8 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_noir_player_NativeUsb_streamLive(J
         state->live.rewind();
         KernelIo io(state->fd, state->liveStopped);
         const auto cpu = threadCpuUs();
-        const auto result = runIsoSource(*state->liveSlots, state->live, endpoint, 8000, maxPacket, io, state->rate, state->frameBytes);
-        std::string report = result.report(8000, static_cast<size_t>(state->live.written()), state->rate, state->frameBytes) + "\nLive PCM ring: " + std::to_string(state->rate * state->frameBytes * kLiveBufferSeconds) + " bytes / 8 seconds; no duration limit\nNative thread CPU: " + std::to_string((threadCpuUs() - cpu) / 1000) + " ms\n" + platformInfo(state->fd);
+        const auto result = runIsoSource(*state->liveSlots, state->live, endpoint, intervals, maxPacket, io, state->rate, state->frameBytes);
+        std::string report = result.report(intervals, static_cast<size_t>(state->live.written()), state->rate, state->frameBytes) + "\nLive PCM ring: " + std::to_string(state->rate * state->frameBytes * kLiveBufferSeconds) + " bytes / 8 seconds; no duration limit\nNative thread CPU: " + std::to_string((threadCpuUs() - cpu) / 1000) + " ms\n" + platformInfo(state->fd);
         report += "\nStop checks: native atomic; no Java callbacks during live USB";
         report += "\nUSB forbid suspend: " + (forbid == 0 ? std::string("confirmed") : "not confirmed, errno=" + std::to_string(forbidError));
         if (result.pending != 0) report += "\nLive error: pending transfers survived cleanup";

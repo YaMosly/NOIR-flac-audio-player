@@ -6,7 +6,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.log10
 import kotlin.math.roundToInt
 
-/** Exclusive connection for the physically checked profile. Construct/release on the worker. */
+/** Exclusive descriptor-selected UAC2 connection. Construct/release on the worker. */
 class UsbLiveHardware @JvmOverloads constructor(private val context: Context, private val profile: UsbPcmProfile = UsbPcmProfile()) : LiveUsbTransport {
     private val token = Any()
     private var connection: UsbDeviceConnection? = null
@@ -15,6 +15,7 @@ class UsbLiveHardware @JvmOverloads constructor(private val context: Context, pr
     private lateinit var inactive: UsbInterface
     private lateinit var active: UsbInterface
     private var maxPacket = 196
+    private lateinit var plan: UsbPlaybackPlan
     private val notes = mutableListOf<String>()
     var handle = 0L
         private set
@@ -25,42 +26,41 @@ class UsbLiveHardware @JvmOverloads constructor(private val context: Context, pr
         DirectUsbSettings.owned.value = true
         try {
             val manager = context.getSystemService(UsbManager::class.java)
-            val device = manager.deviceList.values.singleOrNull { it.vendorId == 0x0e55 && it.productId == 0x1110 }
-                ?: error("Подключи ЦАП 0E55:1110")
+            val device = UsbPlaybackDevices.select(manager)
             check(manager.hasPermission(device)) { "Разреши прямой USB в разделе «Звуковой тракт»" }
             val conn = manager.openDevice(device) ?: error("Не удалось открыть ЦАП")
             connection = conn
             handle = NativeUsb.create(conn.fileDescriptor)
-            NativeUsb.configureLive(handle, profile.rate, profile.frameBytes)
-            check(NativeUsb.speed(handle) == 3) { "Прямой режим пока проверен только для USB high-speed" }
             val description = UsbAudioDescriptors.parse(conn.rawDescriptors)
-            require(description.warnings.isEmpty() && description.clocks.singleOrNull()?.let { it.id == 6 && it.controlInterface == 0 && it.controls and 3 == 3 } == true)
-            require(description.volumes.filter { it.unit == 7 && it.controlInterface == 0 && it.version == 0x200 && it.writable }.map { it.channel }.toSet() == setOf(1, 2))
-            require(description.formats.any { it.iface == 1 && it.alternate == profile.alternate && it.version == 0x200 && it.channels == 2 && it.bits == profile.bits && it.bytesPerSample == profile.sampleBytes })
             val interfaces = (0 until device.interfaceCount).map(device::getInterface)
-            val ac = interfaces.single { it.id == 0 && it.alternateSetting == 0 && it.interfaceClass == UsbConstants.USB_CLASS_AUDIO && it.interfaceSubclass == 1 }
-            inactive = interfaces.single { it.id == 1 && it.alternateSetting == 0 }
-            active = interfaces.single { it.id == 1 && it.alternateSetting == profile.alternate }
-            require(active.endpointCount == 1)
-            val ep = active.getEndpoint(0)
-            require(ep.address == 4 && ep.attributes == 9 && ep.interval == 1 && ep.maxPacketSize in 24..1024)
-            maxPacket = ep.maxPacketSize
-            require(((profile.rate + 7999) / 8000) * profile.frameBytes <= maxPacket) { "Пакет USB недостаточен для ${profile.label}" }
+            val endpoints = interfaces.filter { it.interfaceClass == UsbConstants.USB_CLASS_AUDIO && it.interfaceSubclass == 2 }.flatMap { iface ->
+                (0 until iface.endpointCount).map { index -> iface.getEndpoint(index).let { ep ->
+                    UsbPlaybackEndpoint(iface.id, iface.alternateSetting, ep.address, ep.attributes, ep.interval, ep.maxPacketSize)
+                } }
+            }
+            plan = UsbPlaybackPlans.select(description, endpoints, profile.rate, profile.bits, NativeUsb.speed(handle))
+            val ac = interfaces.single { it.id == plan.clock.controlInterface && it.alternateSetting == 0 && it.interfaceClass == UsbConstants.USB_CLASS_AUDIO && it.interfaceSubclass == 1 }
+            inactive = interfaces.single { it.id == plan.format.iface && it.alternateSetting == 0 && it.endpointCount == 0 }
+            active = interfaces.single { it.id == plan.format.iface && it.alternateSetting == plan.format.alternate }
+            maxPacket = plan.endpoint.maxPacket
+            NativeUsb.configureLive(handle, profile.rate, profile.frameBytes)
+            DirectUsbSettings.device.value = device.productName ?: "USB ${device.vendorId.toString(16)}:${device.productId.toString(16)}"
+            notes += "UAC2: AC ${ac.id}, AS ${active.id}, alt ${active.alternateSetting}, EP ${plan.endpoint.address}, interval ${plan.endpoint.interval}"
             val control = UsbPreviewControls(
                 read = { selector, entity, channel, request, length ->
                     val data = ByteArray(length)
-                    check(conn.controlTransfer(0xa1, request, selector shl 8 or channel, entity shl 8, data, length, 300) == length) { "USB GET не получен" }; data
+                    check(conn.controlTransfer(0xa1, request, selector shl 8 or channel, entity shl 8 or ac.id, data, length, 300) == length) { "USB GET не получен" }; data
                 },
                 write = { selector, entity, channel, bytes ->
-                    check(conn.controlTransfer(0x21, 1, selector shl 8 or channel, entity shl 8, bytes, bytes.size, 300) == bytes.size) { "USB SET не подтверждён" }
-                }, note = notes::add,
+                    check(conn.controlTransfer(0x21, 1, selector shl 8 or channel, entity shl 8 or ac.id, bytes, bytes.size, 300) == bytes.size) { "USB SET не подтверждён" }
+                }, note = notes::add, clockId = plan.clock.id, volumeUnit = plan.volumeUnit, channels = plan.volumeChannels,
             )
             controls = control
             lease = UsbInterfaceLease(
-                acquire = { conn.claimInterface(if (it == 0) ac else inactive, true) },
-                release = { conn.releaseInterface(if (it == 0) ac else inactive) }, note = notes::add,
+                acquire = { conn.claimInterface(if (it == ac.id) ac else inactive, true) },
+                release = { conn.releaseInterface(if (it == ac.id) ac else inactive) }, note = notes::add,
             )
-            lease!!.claim(listOf(0, 1))
+            lease!!.claim(listOf(ac.id, inactive.id))
             check(conn.setInterface(inactive))
             control.prepare(-35, profile.rate)
             DirectUsbSettings.status.value = "Прямой USB · готов · ${profile.label}"
@@ -73,20 +73,21 @@ class UsbLiveHardware @JvmOverloads constructor(private val context: Context, pr
     }
     @Synchronized override fun setVolume(factor: Float) {
         val conn = connection ?: return
-        val halfDb = if (factor <= 0f) -32768 else ((DirectUsbSettings.db.value + 20.0 * log10(factor.toDouble())).coerceIn(-50.0, 0.0) * 2).roundToInt() * 128
+        require(factor.isFinite() && factor in 0f..1f)
+        val halfDb = if (factor <= 0f) -32768 else controls!!.volumeValue(((DirectUsbSettings.db.value + 20.0 * log10(factor.toDouble())).coerceIn(-50.0, 0.0) * 256).roundToInt())
         if (lastVolume == halfDb) return
         val bytes = byteArrayOf(halfDb.toByte(), (halfDb shr 8).toByte())
         try {
-            for (ch in 1..2) {
-                check(conn.controlTransfer(0x21, 1, 0x200 or ch, 7 shl 8, bytes, 2, 300) == 2)
+            for (ch in plan.volumeChannels) {
+                check(conn.controlTransfer(0x21, 1, 0x200 or ch, plan.volumeUnit shl 8 or plan.clock.controlInterface, bytes, 2, 300) == 2)
                 val actual = ByteArray(2)
-                check(conn.controlTransfer(0xa1, 1, 0x200 or ch, 7 shl 8, actual, 2, 300) == 2 && actual.contentEquals(bytes))
+                check(conn.controlTransfer(0xa1, 1, 0x200 or ch, plan.volumeUnit shl 8 or plan.clock.controlInterface, actual, 2, 300) == 2 && actual.contentEquals(bytes))
             }
             lastVolume = halfDb
         } catch (failure: Exception) {
             // Do not leave asymmetric channel levels after a partially successful write.
             val mute = byteArrayOf(0, 0x80.toByte())
-            for (ch in 1..2) runCatching { conn.controlTransfer(0x21, 1, 0x200 or ch, 7 shl 8, mute, 2, 300) }
+            for (ch in plan.volumeChannels) runCatching { conn.controlTransfer(0x21, 1, 0x200 or ch, plan.volumeUnit shl 8 or plan.clock.controlInterface, mute, 2, 300) }
             throw IllegalStateException("ЦАП не подтвердил громкость; поток остановлен", failure)
         }
     }
@@ -97,18 +98,18 @@ class UsbLiveHardware @JvmOverloads constructor(private val context: Context, pr
     override fun finish() = NativeUsb.finishLive(handle)
     override fun reset() = NativeUsb.resetLive(handle)
     override fun transmit(stop: AtomicBoolean): String {
-        check(connection!!.setInterface(active)) { "ЦАП не принял alt ${profile.alternate}" }
+        check(connection!!.setInterface(active)) { "ЦАП не принял alt ${active.alternateSetting}" }
         try {
             DirectUsbSettings.status.value = "Прямой USB · ${profile.label}"
-            return NativeUsb.streamLive(handle, 4, 1, maxPacket)
+            return NativeUsb.streamLive(handle, plan.endpoint.address, plan.endpoint.interval, maxPacket)
         } finally { check(connection!!.setInterface(inactive)) { "Не подтверждён alt 0" } }
     }
     @Synchronized override fun close() {
         val conn = connection
         if (conn != null) {
             try {
-                val stopped = if (::inactive.isInitialized) runCatching { conn.setInterface(inactive) }.getOrDefault(false) else false
-                notes += "AS 1 alt 0 при закрытии: $stopped"
+                val stopped = if (::inactive.isInitialized && lease != null) runCatching { conn.setInterface(inactive) }.getOrDefault(false) else false
+                notes += "AS ${if (::inactive.isInitialized) inactive.id else "?"} alt 0 при закрытии: $stopped"
                 controls?.restore(stopped)
                 lease?.close()
             } finally {

@@ -21,7 +21,7 @@ object BackgroundAudioDiagnostics {
     }
     @Synchronized fun report(context: Context): String = buildString {
         appendLine("Фон и энергопитание: ${runCatching { state(context) }.getOrDefault("неизвестно")}")
-        appendLine("USB: очередь 128 мс; PCM-буфер 8 с; стартовый запас 500 мс")
+        appendLine("USB: PCM-буфер 8 с; стартовый запас 500 мс; размер очереди — в отчёте Native USB")
         events.forEach(::appendLine)
     }
 }

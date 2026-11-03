@@ -6,6 +6,30 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 
 class UsbPreviewControlsTest {
+    @Test fun nonDefaultEntitiesAndMasterVolumeUseDeclaredStepsAndRestoreTheirOwnValues() {
+        fun bytes(width: Int, vararg values: Int) = ByteBuffer.allocate(width * values.size).order(ByteOrder.LITTLE_ENDIAN).apply { values.forEach { if (width == 2) putShort(it.toShort()) else putInt(it) } }.array()
+        var rate = 48000; var volume = -256; val written = mutableListOf<Pair<Int,Int>>()
+        val controls = UsbPreviewControls(
+            read = { selector, entity, channel, request, length ->
+                assertEquals(0,channel)
+                if (entity == 19) {
+                    assertEquals(1,selector)
+                    if(request==1) bytes(4,rate) else (bytes(2,1)+bytes(4,44100,48000,3900)).copyOf(length)
+                } else {
+                    assertEquals(27,entity);assertEquals(2,selector)
+                    if(request==1) bytes(2,volume) else (bytes(2,1)+bytes(2,-50*256,0,256)).copyOf(length)
+                }
+            },
+            write = { _,entity,channel,data -> written += entity to channel; if(entity==19) rate=UsbControlValues.unsigned(data).toInt() else volume=UsbControlValues.signed16(data) },
+            note = {}, clockId = 19, volumeUnit = 27, channels = listOf(0),
+        )
+        controls.prepare(-35)
+        assertEquals(44100,rate);assertEquals(-35*256,volume)
+        assertEquals(-36*256,controls.volumeValue(-35*256-1))
+        controls.restore(true)
+        assertEquals(48000,rate);assertEquals(-256,volume)
+        assertEquals(listOf(27 to 0,19 to 0,19 to 0,27 to 0),written)
+    }
     private class Hardware {
         var clock = 48_000
         val volume = mutableMapOf(1 to 0, 2 to -256)

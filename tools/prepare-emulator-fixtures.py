@@ -13,7 +13,8 @@ serial = sys.argv[2] if len(sys.argv) > 2 else 'emulator-5554'
 def run(*args, **kwargs):
     return subprocess.run([adb, '-s', serial, *args], check=True, capture_output=True, **kwargs).stdout
 assert run('shell', 'getprop', 'ro.kernel.qemu').strip() == b'1', 'Only the isolated emulator is supported'
-assert b'noir-api36' in run('emu', 'avd', 'name'), 'Use the dedicated NOIR AVD'
+avd_name = run('emu', 'avd', 'name').decode().splitlines()[0].strip()
+assert avd_name in {'noir-api36', 'NoirCompat36', 'NoirCompat37'}, 'Use a dedicated NOIR AVD'
 app_root = run('shell', 'run-as', 'dev.noir.player', 'pwd').decode().strip()
 folder = app_root + '/files/test-media'
 run('shell', 'run-as', 'dev.noir.player', 'mkdir', '-p', folder)
