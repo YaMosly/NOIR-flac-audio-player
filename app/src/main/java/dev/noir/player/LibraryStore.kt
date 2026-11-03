@@ -16,6 +16,7 @@ import java.io.File
 import java.util.Locale
 
 data class ScanState(val scanning: Boolean = false, val count: Int = 0, val message: String? = null)
+data class SavedQueueEntry(val id: String, val automatic: Boolean)
 
 class LibraryStore(private val context: Context) {
     private val prefs = context.getSharedPreferences("noir", Context.MODE_PRIVATE)
@@ -30,6 +31,11 @@ class LibraryStore(private val context: Context) {
         private set
     val scores = readScores("scores")
     val artistScores = readScores("artists")
+    val preferences = MutableStateFlow(ListeningPreferences(
+        prefs.getStringSet("less_tracks", emptySet()).orEmpty().toSet(),
+        prefs.getStringSet("less_artists", emptySet()).orEmpty().toSet(),
+    ))
+    val recommendationRevision = MutableStateFlow(0L)
     private val artwork = object : LruCache<String, Bitmap>(12 * 1024) {
         override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount / 1024
     }
@@ -47,15 +53,44 @@ class LibraryStore(private val context: Context) {
         }
     }
 
-    fun setSmart(value: Boolean) { smart.value = value; prefs.edit().putBoolean("smart", value).apply() }
+    fun setSmart(value: Boolean) { smart.value = value; prefs.edit().putBoolean("smart", value).apply(); recommendationRevision.value++ }
+    fun setLessTrack(id: String, less: Boolean) {
+        val current = preferences.value
+        preferences.value = current.copy(tracks = if (less) current.tracks + id else current.tracks - id)
+        savePreferences()
+    }
+    fun setLessArtist(artist: String, less: Boolean) {
+        val key = ListeningPreferences.artistKey(artist)
+        if (key.isBlank()) return
+        val current = preferences.value
+        preferences.value = current.copy(artists = if (less) current.artists + key else current.artists - key)
+        savePreferences()
+    }
+    private fun savePreferences() {
+        prefs.edit().putStringSet("less_tracks", preferences.value.tracks).putStringSet("less_artists", preferences.value.artists).apply()
+        recommendationRevision.value++
+    }
 
     fun savePosition(id: String?, position: Long) {
         prefs.edit().putString("last_track", id).putLong("last_position", position).apply()
     }
+    fun saveQueue(entries: List<SavedQueueEntry>, position: Long) {
+        val queue = JSONArray().apply { entries.take(1000).forEach { put(JSONObject().put("id", it.id).put("auto", it.automatic)) } }.toString()
+        val editor = prefs.edit().putString("last_track", entries.firstOrNull()?.id).putLong("last_position", position)
+        if (queue != prefs.getString("queue", null)) editor.putString("queue", queue)
+        editor.apply()
+    }
+    fun savedQueue(): List<SavedQueueEntry> = runCatching {
+        val value = prefs.getString("queue", "[]").orEmpty()
+        require(value.length <= 1024 * 1024)
+        val queue = JSONArray(value)
+        (0 until minOf(queue.length(), 1000)).map { queue.getJSONObject(it).let { entry -> SavedQueueEntry(entry.getString("id"), entry.optBoolean("auto")) } }
+    }.getOrDefault(emptyList())
 
     fun resetLearning() {
         scores.clear(); artistScores.clear()
         prefs.edit().remove("scores").remove("artists").apply()
+        preferences.value = ListeningPreferences(); savePreferences()
     }
 
     fun record(track: Track, earlySkip: Boolean, completed: Boolean) {
@@ -68,6 +103,7 @@ class LibraryStore(private val context: Context) {
         update(scores, track.id)
         if (track.artist != SmartShuffle.UNKNOWN_ARTIST) update(artistScores, track.artist.lowercase(Locale.ROOT))
         prefs.edit().putString("scores", scoresJson(scores).toString()).putString("artists", scoresJson(artistScores).toString()).apply()
+        if (earlySkip) recommendationRevision.value++
     }
 
     fun scanFolder(uri: Uri) {

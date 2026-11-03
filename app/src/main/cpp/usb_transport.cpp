@@ -1,4 +1,5 @@
 #include "usb_stream_core.h"
+#include "usb_feedback.h"
 #include <jni.h>
 #include <linux/usb/ch9.h>
 #include <unistd.h>
@@ -19,11 +20,14 @@ struct Session {
     int rate = kRate, frameBytes = kFrameBytes;
     Slot slots[kDepth];
     std::unique_ptr<std::array<Slot, kLiveDepth>> liveSlots;
+    FeedbackSlots feedbackSlots;
+    int feedbackEndpoint = 0, feedbackPacketBytes = 0;
     std::atomic_bool liveStopped{false};
     explicit Session(int source): fd(dup(source)) { if (fd < 0) throw std::runtime_error("USB fd duplication failed"); }
     ~Session() {
         // Java closes its connection first. Close the last fd before member buffers die.
         for (auto& slot : slots) if (slot.pending) ioctl(fd, USBDEVFS_DISCARDURB, slot.urb);
+        for (auto& slot : feedbackSlots) if (slot.pending) ioctl(fd, USBDEVFS_DISCARDURB, slot.urb);
         if (liveSlots) for (auto& slot : *liveSlots) if (slot.pending) ioctl(fd, USBDEVFS_DISCARDURB, slot.urb);
         close(fd);
     }
@@ -66,6 +70,9 @@ public:
     int wait(int timeoutMs) override {
         pollfd descriptor{fd_, POLLOUT, 0};
         const int result = poll(&descriptor, 1, timeoutMs);
+        // At 8 kHz, collect several completions per wake without changing URBs or
+        // consuming more than 0.5 ms of the 128 ms compatibility queue reserve.
+        if (result > 0 && nativeStop_ && !stopped() && (descriptor.revents & POLLOUT) && !(descriptor.revents & (POLLERR | POLLHUP | POLLNVAL))) std::this_thread::sleep_for(std::chrono::microseconds(500));
         return result < 0 ? -errno : (result == 0 ? 0 : descriptor.revents);
     }
     int64_t nowUs() override {
@@ -126,6 +133,7 @@ extern "C" JNIEXPORT jint JNICALL Java_dev_noir_player_NativeUsb_feedLive(JNIEnv
 extern "C" JNIEXPORT void JNICALL Java_dev_noir_player_NativeUsb_finishLive(JNIEnv*, jobject, jlong handle) { session(handle)->live.finish(); }
 extern "C" JNIEXPORT void JNICALL Java_dev_noir_player_NativeUsb_resetLive(JNIEnv* env, jobject, jlong handle) {
     auto* state = session(handle);
+    if (std::any_of(state->feedbackSlots.begin(), state->feedbackSlots.end(), [](const Slot& slot) { return slot.pending; })) { failure(env, "Feedback transfers pending during reset"); return; }
     if (std::any_of(std::begin(state->slots), std::end(state->slots), [](const Slot& slot) { return slot.pending; })) { failure(env, "Transfers still pending during reset"); return; }
     if (state->liveSlots && std::any_of(state->liveSlots->begin(), state->liveSlots->end(), [](const Slot& slot) { return slot.pending; })) { failure(env, "Live transfers pending during reset"); return; }
     state->live.clear();
@@ -147,9 +155,15 @@ extern "C" JNIEXPORT jstring JNICALL Java_dev_noir_player_NativeUsb_streamLive(J
         state->live.rewind();
         KernelIo io(state->fd, state->liveStopped);
         const auto cpu = threadCpuUs();
-        const auto result = runIsoSource(*state->liveSlots, state->live, endpoint, intervals, maxPacket, io, state->rate, state->frameBytes);
+        std::unique_ptr<FeedbackUsbIo> feedback;
+        if (state->feedbackEndpoint) feedback = std::make_unique<FeedbackUsbIo>(io, state->feedbackSlots, state->feedbackEndpoint, state->feedbackPacketBytes, state->rate, intervals, busSpeed == USB_SPEED_HIGH);
+        UsbIo& streamIo = feedback ? static_cast<UsbIo&>(*feedback) : static_cast<UsbIo&>(io);
+        const auto result = runIsoSource(*state->liveSlots, state->live, endpoint, intervals, maxPacket, streamIo, state->rate, state->frameBytes);
         std::string report = result.report(intervals, static_cast<size_t>(state->live.written()), state->rate, state->frameBytes) + "\nLive PCM ring: " + std::to_string(state->rate * state->frameBytes * kLiveBufferSeconds) + " bytes / 8 seconds; no duration limit\nNative thread CPU: " + std::to_string((threadCpuUs() - cpu) / 1000) + " ms\n" + platformInfo(state->fd);
         report += "\nStop checks: native atomic; no Java callbacks during live USB";
+        report += "\nCompletion lookup: indexed; free slots: indexed; completion coalescing: 500 us";
+        if (feedback) report += feedback->report();
+        if (feedback && feedback->auxiliaryPending()) report += "\nLive error: pending feedback transfers survived cleanup";
         report += "\nUSB forbid suspend: " + (forbid == 0 ? std::string("confirmed") : "not confirmed, errno=" + std::to_string(forbidError));
         if (result.pending != 0) report += "\nLive error: pending transfers survived cleanup";
         return env->NewStringUTF(report.c_str());
@@ -171,9 +185,21 @@ extern "C" JNIEXPORT void JNICALL Java_dev_noir_player_NativeUsb_configureLive(J
         if (std::find(rates.begin(), rates.end(), rate) == rates.end()) throw std::runtime_error("Unsupported USB rate");
         auto* state = session(handle);
         if (std::any_of(std::begin(state->slots), std::end(state->slots), [](const Slot& slot) { return slot.pending; })) throw std::runtime_error("Transfers pending during configure");
+        if (std::any_of(state->feedbackSlots.begin(), state->feedbackSlots.end(), [](const Slot& slot) { return slot.pending; })) throw std::runtime_error("Feedback transfers pending during configure");
         if (state->liveSlots && std::any_of(state->liveSlots->begin(), state->liveSlots->end(), [](const Slot& slot) { return slot.pending; })) throw std::runtime_error("Live transfers pending during configure");
         if (!state->liveSlots) state->liveSlots = std::make_unique<std::array<Slot, kLiveDepth>>();
         state->live.configure(rate, frameBytes); state->rate = rate; state->frameBytes = frameBytes;
+    } catch (const std::exception& ex) { failure(env, ex.what()); }
+}
+
+extern "C" JNIEXPORT void JNICALL Java_dev_noir_player_NativeUsb_configureFeedback(JNIEnv* env, jobject, jlong handle, jint endpoint, jint interval, jint packetBytes) {
+    try {
+        if (!handle || endpoint < 0x81 || endpoint > 0x8f || interval < 1 || interval > 8 || (packetBytes != 3 && packetBytes != 4)) throw std::runtime_error("Invalid feedback configuration");
+        auto* state = session(handle);
+        if (!state->liveSlots || state->live.written() != 0) throw std::runtime_error("Configure feedback before PCM");
+        for (const auto& slot : *state->liveSlots) if (slot.pending) throw std::runtime_error("Data transfers pending");
+        for (const auto& slot : state->feedbackSlots) if (slot.pending) throw std::runtime_error("Feedback transfers pending");
+        state->feedbackEndpoint = endpoint; state->feedbackPacketBytes = packetBytes;
     } catch (const std::exception& ex) { failure(env, ex.what()); }
 }
 

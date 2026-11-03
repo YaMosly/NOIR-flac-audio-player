@@ -44,8 +44,10 @@ class UsbLiveHardware @JvmOverloads constructor(private val context: Context, pr
             active = interfaces.single { it.id == plan.format.iface && it.alternateSetting == plan.format.alternate }
             maxPacket = plan.endpoint.maxPacket
             NativeUsb.configureLive(handle, profile.rate, profile.frameBytes)
+            plan.feedback?.let { NativeUsb.configureFeedback(handle, it.address, it.interval, it.maxPacket) }
             DirectUsbSettings.device.value = device.productName ?: "USB ${device.vendorId.toString(16)}:${device.productId.toString(16)}"
             notes += "UAC2: AC ${ac.id}, AS ${active.id}, alt ${active.alternateSetting}, EP ${plan.endpoint.address}, interval ${plan.endpoint.interval}"
+            notes += plan.feedback?.let { "Explicit feedback: EP ${it.address}, interval ${it.interval}" } ?: "USB clock: adaptive/synchronous"
             val control = UsbPreviewControls(
                 read = { selector, entity, channel, request, length ->
                     val data = ByteArray(length)

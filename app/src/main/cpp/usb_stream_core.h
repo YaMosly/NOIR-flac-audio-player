@@ -13,6 +13,7 @@
 #include <vector>
 #include <array>
 #include <mutex>
+#include <unordered_map>
 
 namespace noir {
 // xHCI's trb_block_event_intr() always leaves the last TD unblocked. A one-packet
@@ -119,6 +120,12 @@ struct UsbIo {
     virtual int wait(int timeoutMs) = 0;
     virtual int64_t nowUs() = 0;
     virtual bool stopped() = 0;
+    virtual void startAuxiliary() {}
+    virtual bool consumeAuxiliary(usbdevfs_urb*, bool) { return false; }
+    virtual void cancelAuxiliary() {}
+    virtual bool auxiliaryPending() { return false; }
+    virtual int packetFrames(PacketPlan& proposed) { return proposed.next(); }
+    virtual void packetSubmitted() {}
 };
 struct StreamResult {
     struct Completion { int64_t ms; uint64_t bytes; int pending; };
@@ -165,6 +172,11 @@ inline StreamResult runIsoSource(Slots& slots, PcmSource& source, int endpoint, 
     if (((rate + intervals - 1) / intervals) * frameBytes > maxPacket) throw std::runtime_error("Endpoint packet capacity is insufficient");
     for (auto& slot : slots) if (!slot.urb) throw std::bad_alloc();
     StreamResult stats;
+    std::unordered_map<usbdevfs_urb*, Slot*> owners;
+    owners.reserve(static_cast<size_t>(depth));
+    std::vector<Slot*> available;
+    available.reserve(static_cast<size_t>(depth));
+    for (int i = depth - 1; i >= 0; --i) { owners.emplace(slots[i].urb, &slots[i]); available.push_back(&slots[i]); }
     stats.queueDepth = depth;
     stats.recent.reserve(9); // Numeric trace only: no per-packet string allocations.
     int pending = 0;
@@ -181,13 +193,16 @@ inline StreamResult runIsoSource(Slots& slots, PcmSource& source, int endpoint, 
         urb->type = USBDEVFS_URB_TYPE_ISO; urb->endpoint = static_cast<unsigned char>(endpoint);
         urb->flags = USBDEVFS_URB_ISO_ASAP;
         auto nextPlan = plan;
-        const int bytes = source.fill(slot, nextPlan.next() * frameBytes);
+        const int wanted = io.packetFrames(nextPlan) * frameBytes;
+        if (wanted <= 0 || wanted > maxPacket) throw std::runtime_error("Feedback exceeds endpoint packet capacity");
+        const int bytes = source.fill(slot, wanted);
         if (bytes == 0) return false;
         plan = nextPlan;
         urb->iso_frame_desc[0].length = static_cast<unsigned int>(bytes);
         urb->number_of_packets = 1; urb->buffer_length = bytes;
         const int result = call(USBDEVFS_SUBMITURB, urb, stats.maxSubmitUs);
         if (result < 0) throw std::runtime_error("SUBMITURB errno=" + std::to_string(-result));
+        io.packetSubmitted();
         slot.pending = true; ++pending; ++stats.submitted;
         return true;
     };
@@ -196,8 +211,10 @@ inline StreamResult runIsoSource(Slots& slots, PcmSource& source, int endpoint, 
         const int status = call(USBDEVFS_REAPURBNDELAY, &result, stats.maxReapUs);
         if (status == -EAGAIN || status == -EINTR) { ++stats.wouldBlock; return false; }
         if (status < 0) throw std::runtime_error("REAPURB errno=" + std::to_string(-status));
-        auto found = std::find_if(std::begin(slots), std::end(slots), [&](const Slot& slot) { return slot.urb == result && slot.pending; });
-        if (found == std::end(slots)) throw std::runtime_error("Unexpected URB completion");
+        if (io.consumeAuxiliary(result, validate)) return true;
+        const auto owner = owners.find(result);
+        if (owner == owners.end() || !owner->second->pending) throw std::runtime_error("Unexpected URB completion");
+        auto* found = owner->second;
         found->pending = false; --pending;
         if (!validate) {
             ++stats.cleanupReaped;
@@ -229,7 +246,7 @@ inline StreamResult runIsoSource(Slots& slots, PcmSource& source, int endpoint, 
             if (stats.recent.size() > 8) stats.recent.erase(stats.recent.begin());
             if (bad) throw std::runtime_error("ISO completion failed: URB status=" + std::to_string(result->status) + "; " + stats.problem);
             source.acknowledge(*found, result->buffer_length);
-            if (!source.ended() && !io.stopped()) submit(*found);
+            available.push_back(found);
         }
         return true;
     };
@@ -237,12 +254,19 @@ inline StreamResult runIsoSource(Slots& slots, PcmSource& source, int endpoint, 
         if (!source.live() && io.nowUs() - start >= 20'000'000) throw std::runtime_error("USB overall deadline exceeded: 20000 ms");
     };
     try {
-        for (auto& slot : slots) { if (source.ended() || io.stopped()) break; if (!submit(slot)) break; }
+        io.startAuxiliary();
+        auto refill = [&] {
+            while (!available.empty() && !source.ended() && !io.stopped()) {
+                if (!submit(*available.back())) break;
+                available.pop_back();
+            }
+        };
+        refill();
         while (pending > 0 || !source.ended()) {
             if (io.stopped()) { stats.outcome = "stopped"; break; }
             guard();
+            refill();
             if (source.live()) {
-                for (auto& slot : slots) if (!slot.pending && !source.ended() && !submit(slot)) break;
                 if (pending == 0 && !source.ended()) throw std::runtime_error("PCM underrun: stopped instead of inserting silence");
                 if (pending == 0) break;
             }
@@ -262,6 +286,7 @@ inline StreamResult runIsoSource(Slots& slots, PcmSource& source, int endpoint, 
     } catch (const std::exception& ex) { stats.outcome = "failed"; stats.problem = ex.what(); }
     stats.elapsedUs = io.nowUs() - start;
     stats.idleUs = io.nowUs() - lastCompletion;
+    io.cancelAuxiliary();
     for (int i = depth - 1; i >= 0; --i) if (slots[i].pending) {
         const int result = io.control(USBDEVFS_DISCARDURB, slots[i].urb);
         if (result == 0) ++stats.discarded;
@@ -269,7 +294,7 @@ inline StreamResult runIsoSource(Slots& slots, PcmSource& source, int endpoint, 
         else ++stats.discardFailed;
     }
     const auto drainStart = io.nowUs();
-    while (pending > 0 && io.nowUs() - drainStart < 1'000'000) {
+    while ((pending > 0 || io.auxiliaryPending()) && io.nowUs() - drainStart < 1'000'000) {
         try { if (!reap(false)) { const int events = io.wait(5); if (events < 0 && events != -EINTR) break; } }
         catch (...) { break; }
     }
