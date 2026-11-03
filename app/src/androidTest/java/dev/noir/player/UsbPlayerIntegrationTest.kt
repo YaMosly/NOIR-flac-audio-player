@@ -166,6 +166,27 @@ class UsbPlayerIntegrationTest {
         val hash = java.security.MessageDigest.getInstance("SHA-256").digest(data).joinToString("") { "%02x".format(it) }
         assertEquals(expected.getString("file"), expected.getString("sha256"), hash)
     }
+    @Test fun consecutiveSameFormatFlacsShareOneTransportAndConcatenateExactPcm() {
+        val expected=manifest().first { !it.optBoolean("library") && it.getInt("rate")==44100 && it.getInt("bits")==16 }
+        val name=expected.getString("file")
+        val file=java.io.File(context.cacheDir,"gapless-$name")
+        instrumentation.context.assets.open("hires/$name").use { input -> file.outputStream().use(input::copyTo) }
+        try {
+            val track=Track(android.net.Uri.fromFile(file).toString(),"gapless","test",durationMs=1000,sampleRate=44100,bits=16,channels=2)
+            val reference=FlacPcmPreview.decode(context,track,AtomicBoolean(false)).bytes
+            withPlayer { player,transports ->
+                main {
+                    player.setMediaItems(listOf(track.toMediaItem(),track.toMediaItem().buildUpon().setMediaId("second-gapless").build()))
+                    player.prepare();player.play()
+                }
+                eventually { onPlayer { player.playbackState==Player.STATE_ENDED || player.playerError!=null } }
+                main { assertNull(player.playerError);assertEquals(Player.STATE_ENDED,player.playbackState) }
+                assertEquals("Same-format transition reopened USB",1,transports.size)
+                assertArrayEquals(reference+reference,transports.single().bytes())
+                assertEquals((reference.size*2).toLong(),transports.single().completed)
+            }
+        } finally { file.delete() }
+    }
     @Test fun everyUsbRateAndIntegerDepthPreservesAllPcmIncludingLowBits() {
         for (expected in manifest().filter { !it.optBoolean("library") }) {
             val name = expected.getString("file")

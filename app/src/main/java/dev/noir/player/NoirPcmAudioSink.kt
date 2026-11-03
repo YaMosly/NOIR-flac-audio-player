@@ -21,6 +21,7 @@ class NoirPcmAudioSink(android: AudioSink, private val outputs: NoirAudioOutputP
     private var streamOffset = 0L
     private var hash = java.security.MessageDigest.getInstance("SHA-256")
     private var hashed = 0
+    private var hashPts = C.TIME_UNSET
     private var sourceTitle = ""
     private var profile = UsbPcmProfile()
 
@@ -62,10 +63,16 @@ class NoirPcmAudioSink(android: AudioSink, private val outputs: NoirAudioOutputP
         val config = checkNotNull(config)
         val nextPeriod = config.mediaPeriodId?.periodUid
         val nextProfile = checkNotNull(UsbPcmProfile.from(config.format))
-        if (output != null && (period != nextPeriod || profile != nextProfile)) {
+        if (output != null && (profile != nextProfile || eos)) {
             playToEndOfStream()
             if (hasPendingData()) return false
             flushDirect()
+        }
+        if (period != nextPeriod) {
+            // Decoder periods share one clock/USB connection when their wire format
+            // is identical. Do not drain, stop, fade or insert samples at this boundary.
+            period = nextPeriod
+            hash = java.security.MessageDigest.getInstance("SHA-256"); hashed = 0; hashPts = C.TIME_UNSET
         }
         if (output == null) {
             profile = nextProfile
@@ -77,6 +84,7 @@ class NoirPcmAudioSink(android: AudioSink, private val outputs: NoirAudioOutputP
             } catch (failure: Exception) { throw AudioSink.InitializationException(failure.message ?: "USB", 0, config.format, false, failure) }
         }
         if (firstPts == C.TIME_UNSET) firstPts = presentationTimeUs
+        if (hashPts == C.TIME_UNSET) hashPts = presentationTimeUs
         if (discontinuity) {
             firstPts = presentationTimeUs - profile.durationUs(written)
             discontinuity = false
@@ -93,7 +101,7 @@ class NoirPcmAudioSink(android: AudioSink, private val outputs: NoirAudioOutputP
                 val view = buffer.duplicate().apply { position(originalPosition); limit(originalPosition + count) }
                 hash.update(view); hashed += count
                 if (hashed == profile.rate * profile.frameBytes * 15) {
-                    DirectUsbSettings.decodedHash.value = "PCM SHA-256 · ${profile.label} · $sourceTitle · 15 с с позиции ${(firstPts - streamOffset) / 1000} мс: " + hash.digest().joinToString("") { "%02x".format(it) }
+                    DirectUsbSettings.decodedHash.value = "PCM SHA-256 · ${profile.label} · $sourceTitle · 15 с с позиции ${(hashPts - streamOffset) / 1000} мс: " + hash.digest().joinToString("") { "%02x".format(it) }
                 }
             }
             return handled
@@ -119,7 +127,7 @@ class NoirPcmAudioSink(android: AudioSink, private val outputs: NoirAudioOutputP
     override fun setOutputStreamOffsetUs(outputStreamOffsetUs: Long) { streamOffset = outputStreamOffsetUs; super.setOutputStreamOffsetUs(outputStreamOffsetUs) }
     private fun flushDirect() {
         output?.release(); output = null; written = 0; firstPts = C.TIME_UNSET; eos = false; period = null; discontinuity = false
-        hash = java.security.MessageDigest.getInstance("SHA-256"); hashed = 0
+        hash = java.security.MessageDigest.getInstance("SHA-256"); hashed = 0; hashPts = C.TIME_UNSET
     }
     override fun flush() { flushDirect(); super.flush() }
     override fun reset() { flush(); playing = false; super.reset() }
