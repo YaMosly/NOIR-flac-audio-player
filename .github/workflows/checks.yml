@@ -14,9 +14,6 @@ jobs:
   android:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
-    env:
-      ANDROID_AVD_HOME: ${{ runner.temp }}/noir-avd
-      ANDROID_USER_HOME: ${{ runner.temp }}/noir-android
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -46,6 +43,9 @@ jobs:
           build/ci-python/bin/python tools/create-fixtures.py
       - name: Start isolated Android 17 emulator
         timeout-minutes: 6
+        env:
+          ANDROID_AVD_HOME: ${{ runner.temp }}/noir-avd
+          ANDROID_USER_HOME: ${{ runner.temp }}/noir-android
         shell: bash
         run: |
           set -euo pipefail
